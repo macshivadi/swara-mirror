@@ -89,8 +89,31 @@ export class PitchTracker {
     return this.ctx?.state ?? 'closed';
   }
 
+  private micHeld = false;
+
   isMicLive(): boolean {
     return Boolean(this.micStream && this.micStream.getAudioTracks().some((t) => t.readyState === 'live'));
+  }
+
+  /** True while tracks are stopped so playback can leave iOS play-and-record mode. */
+  isMicHeld(): boolean {
+    return this.micHeld;
+  }
+
+  /**
+   * Stop mic tracks without clearing the "keep listening" flag.
+   * iOS stays in a call-style audio session while a live capture track exists,
+   * which ducks playback; releasing the tracks lets piano/playback play louder.
+   */
+  pauseMic(): void {
+    this.micHeld = true;
+    this.releaseMicNodes();
+  }
+
+  /** Restart the mic after pauseMic(), if listening is still wanted. */
+  async resumeMic(): Promise<void> {
+    this.micHeld = false;
+    if (this.wantMic) await this.startMic();
   }
 
   setMode(mode: TrackerMode): void {
@@ -204,7 +227,7 @@ export class PitchTracker {
   }
 
   private async recoverMic(): Promise<void> {
-    if (!this.wantMic || this.recovering) return;
+    if (!this.wantMic || this.recovering || this.micHeld) return;
     this.recovering = true;
     try {
       this.releaseMicNodes();
@@ -240,6 +263,7 @@ export class PitchTracker {
 
   stopMic(): void {
     this.wantMic = false;
+    this.micHeld = false;
     this.releaseMicNodes();
   }
 

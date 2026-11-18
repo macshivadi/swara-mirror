@@ -114,6 +114,7 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
   let listenStarted = 0;
   let playing = false;
   let stopPlayback: (() => void) | null = null;
+  let playbackHolds = 0;
   let useMic = true;
   let stepIndex = 0;
 
@@ -154,12 +155,12 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
 
   const piano = new PianoKeyboard(els.pianoHost, {
     onPlay: (midi, note, frequency) => {
-      void (async () => {
+      void withPlayback(async () => {
         const ctx = await tracker.ensureContext();
         piano.setStepMidi(midi);
         els.status.textContent = `Played ${note}.`;
         await playFreq(ctx, frequency, 420);
-      })();
+      });
     },
   });
   piano.setSaHz(saHz);
@@ -483,6 +484,11 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     if (!listening) return;
     if (now - lastTick < 12) return;
     lastTick = now;
+    if (tracker.isMicHeld()) {
+      // Don't write rests into notation while the mic is ducked for playback.
+      updateListenTimer(now);
+      return;
+    }
     void tracker.resume();
     updateListenTimer(now);
     els.calProgress.hidden = saLocked && !calibrating;
@@ -524,6 +530,31 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     els.listenTimer.textContent = `${mm}:${ss}`;
   }
 
+  /**
+   * Pause a live mic for the duration of piano / notation playback so iOS
+   * leaves play-and-record mode (which ducks output). Resume automatically
+   * afterwards if the user is still in Tap to sing — they shouldn't have to
+   * tap again just because a key was pressed.
+   */
+  async function withPlayback<T>(fn: () => Promise<T>): Promise<T> {
+    playbackHolds += 1;
+    if (listening && playbackHolds === 1) {
+      tracker.pauseMic();
+    }
+    try {
+      return await fn();
+    } finally {
+      playbackHolds -= 1;
+      if (playbackHolds === 0 && listening) {
+        try {
+          await tracker.resumeMic();
+        } catch {
+          /* permission or device may have gone; listening UI stays on */
+        }
+      }
+    }
+  }
+
   async function onListenClick(): Promise<void> {
     // Create/resume the AudioContext in this tap's synchronous turn (iOS Safari).
     tracker.primeFromUserGesture();
@@ -538,28 +569,30 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     }
     const events = collector.getEvents();
     if (!events.length) return;
-    const ctx = await tracker.ensureContext();
-    playing = true;
-    els.btnPlay.disabled = false;
-    els.btnPlay.textContent = 'Stop playback';
-    const { stopped, stop } = await playNotation(events, ctx, {
-      saHz,
-      onEvent: (ev) => {
-        if (ev.type === 'note') {
-          const notes = noteEvents();
-          const idx = notes.findIndex((n) => n.startMs === ev.startMs && n.swara === ev.swara);
-          if (idx >= 0) stepIndex = idx;
-          piano.setStepMidi(swaraToMidi(ev.swara, ev.octave, saHz));
-          syncStepHighlight();
-        }
-      },
+    await withPlayback(async () => {
+      const ctx = await tracker.ensureContext();
+      playing = true;
+      els.btnPlay.disabled = false;
+      els.btnPlay.textContent = 'Stop playback';
+      const { stopped, stop } = await playNotation(events, ctx, {
+        saHz,
+        onEvent: (ev) => {
+          if (ev.type === 'note') {
+            const notes = noteEvents();
+            const idx = notes.findIndex((n) => n.startMs === ev.startMs && n.swara === ev.swara);
+            if (idx >= 0) stepIndex = idx;
+            piano.setStepMidi(swaraToMidi(ev.swara, ev.octave, saHz));
+            syncStepHighlight();
+          }
+        },
+      });
+      stopPlayback = stop;
+      await stopped;
+      playing = false;
+      stopPlayback = null;
+      els.btnPlay.textContent = 'Play notation';
+      renderStrip();
     });
-    stopPlayback = stop;
-    await stopped;
-    playing = false;
-    stopPlayback = null;
-    els.btnPlay.textContent = 'Play notation';
-    renderStrip();
   }
 
   async function onCopy(): Promise<void> {
@@ -591,8 +624,10 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     syncStepHighlight();
     const ev = notes[stepIndex]!;
     if (play) {
-      const ctx = await tracker.ensureContext();
-      await playFreq(ctx, westernNoteToHz(swaraToWesternNote(ev.swara, ev.octave, saHz)), 380);
+      await withPlayback(async () => {
+        const ctx = await tracker.ensureContext();
+        await playFreq(ctx, westernNoteToHz(swaraToWesternNote(ev.swara, ev.octave, saHz)), 380);
+      });
     }
   }
 
