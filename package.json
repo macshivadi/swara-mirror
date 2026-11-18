@@ -1,0 +1,19 @@
+{
+  "name": "swara-mirror",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Sing into your mic and see Carnatic swara notation appear live. Runs entirely in the browser.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^7.1.12",
+    "vitest": "^3.2.4"
+  }
+}
