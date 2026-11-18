@@ -1,21 +1,39 @@
 import { PitchTracker } from '../audio/pitchTracker';
-import { AUDIO_SETTINGS as S } from '../audio/settings';
 import {
   calibrationErrorMessage,
   evaluateCalibration,
   type CalibrateSample,
 } from '../music/calibrate';
-import { DisplaySmoother, NotationCollector, withHysteresis } from '../music/notation';
+import { formatNotationText, notationFilename } from '../music/exportText';
+import {
+  intonationHint,
+  readStoredLevel,
+  settingsFor,
+  writeStoredLevel,
+  type SkillLevel,
+} from '../music/levels';
+import {
+  DisplaySmoother,
+  formatKeyboardAscii,
+  formatNotationLine,
+  NotationCollector,
+  withHysteresis,
+  type NotationEvent,
+  type NotationFormat,
+} from '../music/notation';
 import {
   hzToSwara,
   hzToWesternNote,
   SA_DROPDOWN_NOTES,
   SWARA_INFO,
+  swaraToMidi,
+  swaraToWesternNote,
   westernNoteToHz,
   type PitchClass,
 } from '../music/swara';
-import { playNotation } from '../playback/synth';
+import { playFreq, playNotation } from '../playback/synth';
 import { SwaraStaff } from './canvasStaff';
+import { PianoKeyboard } from './piano';
 
 export interface MirrorState {
   listening: boolean;
@@ -24,11 +42,19 @@ export interface MirrorState {
   saNote: string;
   frequency: number | null;
   pitch: PitchClass | null;
+  westernNote: string | null;
   notationAscii: string;
   notationGlyph: string;
+  keyboardLine: string;
   error: string | null;
-  level: number;
+  level: SkillLevel;
+  format: NotationFormat;
   calProgress: number;
+  saLocked: boolean;
+  liveStatus: string;
+  listenElapsedMs: number;
+  inputLevel: number;
+  contextState: string;
 }
 
 export interface SwaraMirrorApi {
@@ -40,6 +66,9 @@ export interface SwaraMirrorApi {
   startListening: (mode?: 'mic' | 'silent') => Promise<void>;
   startCalibration: (mode?: 'mic' | 'silent') => Promise<void>;
   stopListening: () => void;
+  setLevel: (level: SkillLevel) => void;
+  setFormat: (format: NotationFormat) => void;
+  getExportText: (title?: string, date?: Date) => string;
   getState: () => MirrorState;
   getNotationAscii: () => string;
   clearNotation: () => void;
@@ -56,9 +85,13 @@ const DEFAULT_SA = 'C#4';
 export function mountApp(root: HTMLElement): SwaraMirrorApi {
   root.innerHTML = layout();
 
+  let skillLevel: SkillLevel = readStoredLevel(window.localStorage);
+  let level = settingsFor(skillLevel);
+  let format: NotationFormat = 'both';
+
   const tracker = new PitchTracker();
-  const collector = new NotationCollector({ holdMs: S.notationHoldMs, restMs: S.notationRestMs });
-  const smoother = new DisplaySmoother(S.displayHoldMs);
+  const collector = new NotationCollector({ holdMs: level.notationHoldMs, restMs: level.notationRestMs });
+  const smoother = new DisplaySmoother(level.displayHoldMs);
   const staff = new SwaraStaff(root.querySelector('#staff')!);
 
   let saHz = westernNoteToHz(DEFAULT_SA);
@@ -70,18 +103,27 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
   let stickyPitch: PitchClass | null = null;
   let lastFreq: number | null = null;
   let lastError: string | null = null;
-  let lastLevel = 0;
+  let inputLevel = 0;
   let calProgress = 0;
   let raf = 0;
+  let pollTimer = 0;
+  let lastTick = 0;
+  let saLocked = false;
+  let saPrompt: 'auto' | 'manual' | null = null;
+  let liveStatus = '';
+  let listenStarted = 0;
   let playing = false;
   let stopPlayback: (() => void) | null = null;
   let useMic = true;
+  let stepIndex = 0;
 
   const els = {
     stage: root.querySelector<HTMLElement>('.swara-stage')!,
     livePill: root.querySelector<HTMLElement>('#live-pill')!,
     big: root.querySelector<HTMLElement>('#big-swara')!,
+    western: root.querySelector<HTMLElement>('#western-note')!,
     name: root.querySelector<HTMLElement>('#swara-name')!,
+    intonation: root.querySelector<HTMLElement>('#intonation')!,
     centsNeedle: root.querySelector<HTMLElement>('#cents-needle')!,
     centsLabel: root.querySelector<HTMLElement>('#cents-label')!,
     calPanel: root.querySelector<HTMLElement>('#cal-panel')!,
@@ -89,6 +131,7 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     calHearing: root.querySelector<HTMLElement>('#cal-hearing')!,
     calProgress: root.querySelector<HTMLElement>('#cal-progress')!,
     calProgressFill: root.querySelector<HTMLElement>('#cal-progress-fill')!,
+    listenTimer: root.querySelector<HTMLElement>('#listen-timer')!,
     strip: root.querySelector<HTMLElement>('#notation-strip')!,
     saSelect: root.querySelector<HTMLSelectElement>('#sa-select')!,
     saReadout: root.querySelector<HTMLElement>('#sa-readout')!,
@@ -99,7 +142,27 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     btnCopy: root.querySelector<HTMLButtonElement>('#btn-copy')!,
     btnClear: root.querySelector<HTMLButtonElement>('#btn-clear')!,
     btnPlay: root.querySelector<HTMLButtonElement>('#btn-play')!,
+    btnPrev: root.querySelector<HTMLButtonElement>('#btn-prev')!,
+    btnNext: root.querySelector<HTMLButtonElement>('#btn-next')!,
+    btnDownload: root.querySelector<HTMLButtonElement>('#btn-download')!,
+    btnPrint: root.querySelector<HTMLButtonElement>('#btn-print')!,
+    titleInput: root.querySelector<HTMLInputElement>('#song-title')!,
+    stepLabel: root.querySelector<HTMLElement>('#step-label')!,
+    printSheet: root.querySelector<HTMLElement>('#print-sheet')!,
+    pianoHost: root.querySelector<HTMLElement>('#piano')!,
   };
+
+  const piano = new PianoKeyboard(els.pianoHost, {
+    onPlay: (midi, note, frequency) => {
+      void (async () => {
+        const ctx = await tracker.ensureContext();
+        piano.setStepMidi(midi);
+        els.status.textContent = `Played ${note}.`;
+        await playFreq(ctx, frequency, 420);
+      })();
+    },
+  });
+  piano.setSaHz(saHz);
 
   function fillSaDropdown(): void {
     els.saSelect.innerHTML = SA_DROPDOWN_NOTES.map((n) => {
@@ -109,15 +172,19 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     }).join('');
   }
 
-  function setSa(hz: number, fromNote?: string): void {
+  function setSa(hz: number, fromNote?: string, lock = true): void {
     saHz = hz;
+    if (lock) saLocked = true;
     stickyPitch = null;
     smoother.reset();
     const nearest = fromNote ?? hzToWesternNote(hz).note;
     if (SA_DROPDOWN_NOTES.includes(nearest)) {
       els.saSelect.value = nearest;
     }
+    piano.setSaHz(saHz);
     updateSaReadout();
+    renderStrip();
+    syncStepHighlight();
   }
 
   function updateSaReadout(): void {
@@ -126,43 +193,108 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     els.saReadout.textContent = `Sa = ${saHz.toFixed(1)} Hz, near ${note}${centsBit}`;
   }
 
+  function applyLevel(next: SkillLevel, persist = true): void {
+    skillLevel = next;
+    level = settingsFor(skillLevel);
+    collector.setTiming({ holdMs: level.notationHoldMs, restMs: level.notationRestMs });
+    smoother.setHoldMs(level.displayHoldMs);
+    if (persist) writeStoredLevel(skillLevel, window.localStorage);
+    root.querySelectorAll<HTMLButtonElement>('[data-level]').forEach((btn) => {
+      btn.classList.toggle('is-on', btn.dataset.level === skillLevel);
+      btn.setAttribute('aria-checked', btn.dataset.level === skillLevel ? 'true' : 'false');
+    });
+    els.stage.classList.toggle('cents-hidden', level.centsMeter === 'hidden');
+  }
+
+  function applyFormat(next: NotationFormat): void {
+    format = next;
+    root.querySelectorAll<HTMLButtonElement>('[data-format]').forEach((btn) => {
+      btn.classList.toggle('is-on', btn.dataset.format === format);
+      btn.setAttribute('aria-checked', btn.dataset.format === format ? 'true' : 'false');
+    });
+    renderStrip();
+  }
+
+  function noteEvents(): Extract<NotationEvent, { type: 'note' }>[] {
+    return collector.getEvents().filter((e): e is Extract<NotationEvent, { type: 'note' }> => e.type === 'note');
+  }
+
+  function syncStepHighlight(): void {
+    const notes = noteEvents();
+    if (!notes.length) {
+      piano.setStepMidi(null);
+      els.stepLabel.textContent = 'Play or step through the captured notation to see the next key.';
+      els.btnPrev.disabled = true;
+      els.btnNext.disabled = true;
+      return;
+    }
+    stepIndex = Math.max(0, Math.min(stepIndex, notes.length - 1));
+    const ev = notes[stepIndex]!;
+    piano.setStepMidi(swaraToMidi(ev.swara, ev.octave, saHz));
+    const sw = ev.swara;
+    const key = swaraToWesternNote(ev.swara, ev.octave, saHz);
+    els.stepLabel.textContent = `Next key ${stepIndex + 1} of ${notes.length}: ${sw} (${key})`;
+    els.btnPrev.disabled = stepIndex <= 0;
+    els.btnNext.disabled = stepIndex >= notes.length - 1;
+  }
+
   function renderPitch(pitch: PitchClass | null, freq: number | null): void {
     lastPitch = pitch;
     lastFreq = freq;
     if (!pitch) {
       els.big.innerHTML = listening ? '—' : 'S';
+      els.western.textContent = listening ? '' : hzToWesternNote(saHz).note;
       els.name.textContent = calibrating
         ? 'Sing a steady Sa'
         : listening
           ? 'Listening for your voice…'
           : 'Set your Sa, then start listening';
+      els.intonation.textContent = '';
       els.centsNeedle.style.left = '50%';
       els.centsLabel.textContent = freq ? `${freq.toFixed(1)} Hz` : '— cents';
+      piano.setLiveMidi(null);
       return;
     }
     els.big.innerHTML = renderBigGlyph(pitch);
+    const western = swaraToWesternNote(pitch.swara, pitch.octave, saHz);
+    els.western.textContent = western;
+    piano.setLiveMidi(swaraToMidi(pitch.swara, pitch.octave, saHz));
     const info = SWARA_INFO[pitch.swara];
     const aka = info.aka ? ` · also ${info.aka}` : '';
-    els.name.textContent = `${info.full}${aka}`;
+    els.name.textContent = `${info.full}${aka} · ${western}`;
     const cents = Math.max(-50, Math.min(50, pitch.cents));
     els.centsNeedle.style.left = `${50 + cents}%`;
     const sign = pitch.cents > 0.5 ? '+' : pitch.cents < -0.5 ? '' : '';
-    els.centsLabel.textContent = `${sign}${pitch.cents.toFixed(0)} cents · ${freq?.toFixed(1) ?? '—'} Hz`;
+    const hint = intonationHint(pitch.cents, level.snapCents);
+    if (level.centsMeter === 'hidden') {
+      els.centsLabel.textContent = western;
+      els.intonation.textContent = '';
+    } else if (level.centsMeter === 'hint') {
+      els.centsLabel.textContent = `${sign}${pitch.cents.toFixed(0)} cents · ${freq?.toFixed(1) ?? '—'} Hz`;
+      els.intonation.textContent = hint === 'sharp' ? 'A little sharp' : hint === 'flat' ? 'A little flat' : 'In tune';
+    } else {
+      els.centsLabel.textContent = `${sign}${pitch.cents.toFixed(0)} cents · ${freq?.toFixed(1) ?? '—'} Hz`;
+      els.intonation.textContent = hint === 'in-tune' ? 'In tune' : hint === 'sharp' ? 'Sharp' : 'Flat';
+    }
   }
 
   function renderStrip(): void {
-    const text = collector.toGlyphText();
+    const events = collector.getEvents();
+    const text = formatNotationLine(events, saHz, format);
     if (!text) {
       els.strip.classList.add('empty');
-      els.strip.textContent = 'Stable swaras will line up here, like S R₂ G₃ — P D₂ Ṡ';
+      els.strip.textContent = 'Stable swaras will line up here, like S (C#4)  R₂ (D#4)  —  P (G#4)';
     } else {
       els.strip.classList.remove('empty');
       els.strip.textContent = text;
     }
-    const hasNotes = collector.getEvents().some((e) => e.type === 'note');
+    const hasNotes = events.some((e) => e.type === 'note');
     els.btnCopy.disabled = !hasNotes;
     els.btnClear.disabled = !hasNotes && !text;
     els.btnPlay.disabled = !hasNotes && !playing;
+    els.btnDownload.disabled = !hasNotes;
+    els.btnPrint.disabled = !hasNotes;
+    syncStepHighlight();
   }
 
   function setError(msg: string | null): void {
@@ -170,33 +302,88 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     els.error.textContent = msg ?? '';
   }
 
-  function showCalPanel(on: boolean): void {
-    els.calPanel.hidden = !on;
-    if (!on) {
-      els.levelFill.style.width = '0%';
-      els.calProgressFill.style.width = '0%';
-      calProgress = 0;
+  function setLiveStatus(msg: string): void {
+    liveStatus = msg;
+    els.calHearing.textContent = msg;
+  }
+
+  function updateLiveMeter(meter: number, freq: number | null): void {
+    els.calPanel.hidden = !listening;
+    els.levelFill.style.width = `${Math.round(meter * 100)}%`;
+    if (!listening) return;
+    if (meter < 0.1 && !freq) {
+      setLiveStatus('Too quiet — move closer');
+    } else if (!saLocked) {
+      if (freq) setLiveStatus(`Listening… finding your Sa (~${freq.toFixed(0)} Hz)`);
+      else setLiveStatus('Listening… sing now');
+    } else if (freq) {
+      setLiveStatus('Listening… sing now');
+    } else if (meter < 0.14) {
+      setLiveStatus('Too quiet — move closer');
+    } else {
+      setLiveStatus('Listening… sing now');
     }
   }
 
   function setListeningUi(on: boolean): void {
-    els.stage.classList.toggle('live', on && !calibrating);
-    els.stage.classList.toggle('calibrating', calibrating);
+    els.stage.classList.toggle('live', on);
+    els.stage.classList.toggle('calibrating', on && !saLocked);
     els.livePill.hidden = !on;
     const pillLabel = els.livePill.querySelector('span:last-child');
-    if (pillLabel) pillLabel.textContent = calibrating ? 'Setting Sa' : 'Listening';
-    els.btnListen.textContent = on ? 'Stop' : 'Start listening';
+    if (pillLabel) pillLabel.textContent = 'Listening… sing now';
+    els.btnListen.textContent = on ? 'Stop' : 'Tap to sing';
     els.btnListen.classList.toggle('listening', on);
     els.btnListen.classList.toggle('primary', !on);
-    els.btnSa.textContent = calibrating ? 'Listening for Sa…' : 'Set my Sa';
-    showCalPanel(calibrating);
+    els.btnListen.classList.toggle('sing-btn', true);
+    els.btnSa.textContent = 'Set my Sa';
+    els.calPanel.hidden = !on;
+    els.calProgress.hidden = !on || (saLocked && !calibrating);
+    if (!on) {
+      els.levelFill.style.width = '0%';
+      els.calProgressFill.style.width = '0%';
+      calProgress = 0;
+      els.listenTimer.textContent = '0:00';
+      setLiveStatus('');
+    } else {
+      updateListenTimer(performance.now());
+    }
   }
 
   async function prepareAudio(mode: 'mic' | 'silent'): Promise<void> {
     useMic = mode === 'mic';
-    await tracker.ensureContext();
+    tracker.primeFromUserGesture();
     if (useMic) await tracker.startMic();
-    await tracker.ensureContext();
+    await tracker.resume();
+  }
+
+  function startLoop(): void {
+    stopLoop();
+    lastTick = 0;
+    const pump = () => {
+      try {
+        tick(performance.now());
+      } catch {
+        /* keep the loop alive — a single DSP glitch must not stall listening */
+      }
+      if (listening) raf = requestAnimationFrame(pump);
+    };
+    raf = requestAnimationFrame(pump);
+    pollTimer = window.setInterval(() => {
+      try {
+        tick(performance.now());
+      } catch {
+        /* keep the loop alive */
+      }
+    }, 33);
+  }
+
+  function stopLoop(): void {
+    cancelAnimationFrame(raf);
+    raf = 0;
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = 0;
+    }
   }
 
   async function startListening(mode: 'mic' | 'silent' = 'mic'): Promise<void> {
@@ -206,7 +393,7 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     } catch (err) {
       const name = err instanceof DOMException ? err.name : '';
       if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
-        setError('Microphone permission was denied. Allow the mic, or pick a Sa from the list.');
+        setError('Microphone permission was denied. Allow the mic, or pick a Sa from the list in Settings.');
       } else if (name === 'NotFoundError') {
         setError('No microphone was found.');
       } else {
@@ -218,11 +405,14 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
       setListeningUi(false);
       throw err;
     }
+    // Stay in listen mode so notation and auto-Sa share one pitch stream.
     tracker.setMode('listen');
     listening = true;
+    listenStarted = performance.now();
+    if (!saLocked) beginAutoSa('auto');
     setListeningUi(true);
-    cancelAnimationFrame(raf);
-    loop();
+    setLiveStatus('Listening… sing now');
+    startLoop();
   }
 
   function stopListening(): void {
@@ -230,106 +420,113 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     calibrating = false;
     tracker.setMode('listen');
     tracker.stopMic();
-    cancelAnimationFrame(raf);
+    stopLoop();
     setListeningUi(false);
     renderPitch(null, null);
   }
 
-  async function startCalibration(mode: 'mic' | 'silent' = 'mic'): Promise<void> {
-    setError(null);
-    els.status.textContent = mode === 'mic' ? 'Allow the microphone if asked, then sing a steady Sa…' : 'Listening for a steady Sa…';
+  function beginAutoSa(kind: 'auto' | 'manual' = 'auto'): void {
+    saPrompt = kind;
     calibrating = true;
     calibrateSamples = [];
     calProgress = 0;
-    stickyPitch = null;
-    tracker.setMode('calibrate');
-    tracker.resetStabilizer();
-    try {
-      // Resume the context in this tap, then open the mic (with a fallback
-      // constraint set). The 3–4 s window starts only after the stream is live
-      // so a permission prompt cannot eat the whole calibration.
-      await prepareAudio(mode);
-    } catch {
-      calibrating = false;
-      tracker.setMode('listen');
-      setListeningUi(false);
-      return;
-    }
-    calibrateSamples = [];
     calibrateStarted = performance.now();
-    listening = true;
-    setListeningUi(true);
-    cancelAnimationFrame(raf);
-    loop();
   }
 
-  function finishCalibration(result: ReturnType<typeof evaluateCalibration>): void {
+  async function startCalibration(mode: 'mic' | 'silent' = 'mic'): Promise<void> {
+    setError(null);
+    // Manual retake from Settings — do not stop listening or pause notation.
+    if (!listening) {
+      try {
+        await startListening(mode);
+      } catch {
+        return;
+      }
+    } else {
+      await tracker.ensureContext();
+    }
+    saLocked = false;
+    beginAutoSa('manual');
+    setListeningUi(true);
+    els.status.textContent = 'Sing a steady note — I’ll use it as Sa and keep listening.';
+  }
+
+  function lockSaFromCalibration(result: ReturnType<typeof evaluateCalibration>): void {
+    const manual = saPrompt === 'manual';
     calibrating = false;
-    tracker.setMode('listen');
-    showCalPanel(false);
+    els.calProgressFill.style.width = '0%';
     if (!result.ok || result.snappedHz === null || result.snappedNote === null) {
-      setError(calibrationErrorMessage(result.reason));
-      els.status.textContent = '';
+      saPrompt = null;
+      if (manual) {
+        setError(calibrationErrorMessage(result.reason));
+        saLocked = true;
+      } else {
+        saLocked = true;
+        setLiveStatus(`Using ${hzToWesternNote(saHz).note} as Sa — change it in Settings if you like`);
+      }
       setListeningUi(listening);
       return;
     }
-    setSa(result.snappedHz, result.snappedNote);
-    const raw = result.medianHz !== null ? `heard ${result.medianHz.toFixed(1)} Hz, ` : '';
-    els.status.textContent = `Sa set to ${result.snappedNote} (${result.snappedHz.toFixed(1)} Hz; ${raw}snapped to the nearest semitone).`;
+    const previousSa = saHz;
+    collector.remapSa(previousSa, result.snappedHz);
+    setSa(result.snappedHz, result.snappedNote, true);
     setError(null);
+    const raw = result.medianHz !== null ? `heard ${result.medianHz.toFixed(1)} Hz, ` : '';
+    const msg = `Sa set to ${result.snappedNote} (${result.snappedHz.toFixed(1)} Hz; ${raw}keep singing)`;
+    els.status.textContent = msg;
+    setLiveStatus(`Sa set to ${result.snappedNote} — keep singing`);
+    saPrompt = null;
     setListeningUi(listening);
   }
 
-  function updateCalFeedback(now: number, freq: number | null, level: number): ReturnType<typeof evaluateCalibration> {
-    const elapsed = now - calibrateStarted;
-    const result = evaluateCalibration(calibrateSamples, elapsed);
-    calProgress = result.progress;
-    els.levelFill.style.width = `${Math.round(level * 100)}%`;
-    els.calProgressFill.style.width = `${Math.round(result.progress * 100)}%`;
-    els.calProgress.setAttribute('aria-valuenow', String(Math.round(result.progress * 100)));
-    if (freq && result.snappedNote) {
-      els.calHearing.textContent = `Hearing ~${freq.toFixed(0)} Hz · ${result.snappedNote}`;
-      els.status.textContent = `Hearing ~${freq.toFixed(0)} Hz (near ${result.snappedNote}). Hold it steadily…`;
-    } else if (level < 0.12) {
-      els.calHearing.textContent = 'Sing a little louder — waiting for your Sa…';
-      els.status.textContent = 'Sing a little louder, then hold a steady Sa.';
-    } else {
-      els.calHearing.textContent = 'Hold a steady Sa…';
-      els.status.textContent = 'I can hear you — hold one steady note.';
-    }
-    return result;
-  }
-
-  function loop(): void {
+  function tick(now: number): void {
     if (!listening) return;
-    const now = performance.now();
+    if (now - lastTick < 12) return;
+    lastTick = now;
+    void tracker.resume();
+    updateListenTimer(now);
+    els.calProgress.hidden = saLocked && !calibrating;
     const reading = tracker.read(now);
-    lastLevel = reading.level;
+    inputLevel = reading.level;
     const freq = reading.frequency;
     const classified = freq ? hzToSwara(freq, saHz) : null;
-    const held = classified ? withHysteresis(stickyPitch, classified, S.hysteresisCents) : null;
+    const held = classified ? withHysteresis(stickyPitch, classified, level.hysteresisCents) : null;
     stickyPitch = held;
     const display = smoother.update(now, held);
 
-    if (calibrating) {
+    // Always write notation while the mic is open — never pause for Sa.
+    if (held) collector.update(now, held);
+    else collector.update(now, null);
+
+    if (!saLocked || calibrating) {
       if (freq) calibrateSamples.push({ timeMs: now, frequency: freq });
-      const result = updateCalFeedback(now, freq, reading.level);
-      if (result.ok || result.reason !== 'waiting') finishCalibration(result);
-    } else if (held) {
-      collector.update(now, held);
-    } else {
-      collector.update(now, null);
+      const result = evaluateCalibration(calibrateSamples, now - calibrateStarted, level.calibrate);
+      calProgress = result.progress;
+      els.calProgressFill.style.width = `${Math.round(result.progress * 100)}%`;
+      els.calProgress.setAttribute('aria-valuenow', String(Math.round(result.progress * 100)));
+      if (result.ok || result.reason !== 'waiting') {
+        lockSaFromCalibration(result);
+      }
     }
 
+    updateLiveMeter(reading.level, freq);
     staff.push({ timeMs: now, totalCents: (display ?? held)?.totalCents ?? 0, voiced: Boolean(held) });
     staff.draw(now, display);
     renderPitch(display, freq);
     renderStrip();
-    raf = requestAnimationFrame(loop);
+  }
+
+  function updateListenTimer(now: number): void {
+    const ms = listening ? Math.max(0, now - listenStarted) : 0;
+    const sec = Math.floor(ms / 1000);
+    const mm = Math.floor(sec / 60);
+    const ss = String(sec % 60).padStart(2, '0');
+    els.listenTimer.textContent = `${mm}:${ss}`;
   }
 
   async function onListenClick(): Promise<void> {
-    await tracker.ensureContext();
+    // Create/resume the AudioContext in this tap's synchronous turn (iOS Safari).
+    tracker.primeFromUserGesture();
     if (listening) stopListening();
     else await startListening('mic');
   }
@@ -345,7 +542,18 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     playing = true;
     els.btnPlay.disabled = false;
     els.btnPlay.textContent = 'Stop playback';
-    const { stopped, stop } = await playNotation(events, ctx, { saHz });
+    const { stopped, stop } = await playNotation(events, ctx, {
+      saHz,
+      onEvent: (ev) => {
+        if (ev.type === 'note') {
+          const notes = noteEvents();
+          const idx = notes.findIndex((n) => n.startMs === ev.startMs && n.swara === ev.swara);
+          if (idx >= 0) stepIndex = idx;
+          piano.setStepMidi(swaraToMidi(ev.swara, ev.octave, saHz));
+          syncStepHighlight();
+        }
+      },
+    });
     stopPlayback = stop;
     await stopped;
     playing = false;
@@ -355,8 +563,7 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
   }
 
   async function onCopy(): Promise<void> {
-    const text = collector.toAsciiText();
-    if (!text) return;
+    const text = buildExport(els.titleInput.value, new Date());
     try {
       await navigator.clipboard.writeText(text);
       els.status.textContent = 'Copied the notation.';
@@ -371,23 +578,102 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     staff.clear();
     smoother.reset();
     stickyPitch = null;
+    stepIndex = 0;
+    piano.setStepMidi(null);
     els.status.textContent = '';
     renderStrip();
   }
 
+  async function stepBy(delta: number, play = true): Promise<void> {
+    const notes = noteEvents();
+    if (!notes.length) return;
+    stepIndex = Math.max(0, Math.min(notes.length - 1, stepIndex + delta));
+    syncStepHighlight();
+    const ev = notes[stepIndex]!;
+    if (play) {
+      const ctx = await tracker.ensureContext();
+      await playFreq(ctx, westernNoteToHz(swaraToWesternNote(ev.swara, ev.octave, saHz)), 380);
+    }
+  }
+
+  function buildExport(title: string | undefined, date: Date): string {
+    return formatNotationText({
+      title,
+      date,
+      saNote: hzToWesternNote(saHz).note,
+      saHz,
+      level: skillLevel,
+      swaraLine: formatNotationLine(collector.getEvents(), saHz, 'swara'),
+      keyboardLine: formatKeyboardAscii(collector.getEvents(), saHz),
+    });
+  }
+
+  function onDownload(): void {
+    const date = new Date();
+    const title = els.titleInput.value;
+    const text = buildExport(title, date);
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = notationFilename(title, date);
+    document.body.append(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    els.status.textContent = 'Downloaded a text file of the notation.';
+  }
+
+  function onPrint(): void {
+    const date = new Date();
+    const title = els.titleInput.value.trim() || 'Swara Mirror notation';
+    const text = buildExport(els.titleInput.value, date);
+    els.printSheet.innerHTML = `<h1>${escapeHtml(title)}</h1><pre class="print-lines">${escapeHtml(text)}</pre>`;
+    window.print();
+  }
+
   fillSaDropdown();
+  applyLevel(skillLevel, false);
+  applyFormat('both');
   updateSaReadout();
   renderPitch(null, null);
   renderStrip();
 
   els.btnListen.addEventListener('click', () => void onListenClick());
+
+  const resumeIfListening = () => {
+    if (!listening) return;
+    tracker.primeFromUserGesture();
+    void tracker.resume();
+  };
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') resumeIfListening();
+  });
+  window.addEventListener('pageshow', resumeIfListening);
+  window.addEventListener('focus', resumeIfListening);
+  els.stage.addEventListener('touchstart', () => void tracker.resume(), { passive: true });
+
   els.btnSa.addEventListener('click', () => void startCalibration('mic'));
   els.btnCopy.addEventListener('click', () => void onCopy());
   els.btnClear.addEventListener('click', onClear);
   els.btnPlay.addEventListener('click', () => void onPlay());
+  els.btnPrev.addEventListener('click', () => void stepBy(-1));
+  els.btnNext.addEventListener('click', () => void stepBy(1));
+  els.btnDownload.addEventListener('click', onDownload);
+  els.btnPrint.addEventListener('click', onPrint);
   els.saSelect.addEventListener('change', () => {
     setSa(westernNoteToHz(els.saSelect.value), els.saSelect.value);
     els.status.textContent = `Sa set to ${els.saSelect.value}.`;
+  });
+  root.querySelectorAll<HTMLButtonElement>('[data-level]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const value = btn.dataset.level as SkillLevel;
+      applyLevel(value);
+      els.status.textContent = `Level set to ${settingsFor(value).label}.`;
+    });
+  });
+  root.querySelectorAll<HTMLButtonElement>('[data-format]').forEach((btn) => {
+    btn.addEventListener('click', () => applyFormat(btn.dataset.format as NotationFormat));
   });
 
   const onResize = () => {
@@ -405,6 +691,9 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     startListening: (mode = 'silent') => startListening(mode),
     startCalibration: (mode = 'silent') => startCalibration(mode),
     stopListening: () => stopListening(),
+    setLevel: (next) => applyLevel(next),
+    setFormat: (next) => applyFormat(next),
+    getExportText: (title, date) => buildExport(title, date ?? new Date()),
     getState: () => ({
       listening,
       calibrating,
@@ -412,11 +701,19 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
       saNote: hzToWesternNote(saHz).note,
       frequency: lastFreq,
       pitch: lastPitch,
+      westernNote: lastPitch ? swaraToWesternNote(lastPitch.swara, lastPitch.octave, saHz) : hzToWesternNote(saHz).note,
       notationAscii: collector.toAsciiText(),
       notationGlyph: collector.toGlyphText(),
+      keyboardLine: formatKeyboardAscii(collector.getEvents(), saHz),
       error: lastError,
-      level: lastLevel,
+      level: skillLevel,
+      format,
       calProgress,
+      saLocked,
+      liveStatus,
+      listenElapsedMs: listening ? Math.max(0, performance.now() - listenStarted) : 0,
+      inputLevel,
+      contextState: tracker.contextState,
     }),
     getNotationAscii: () => collector.toAsciiText(),
     clearNotation: () => onClear(),
@@ -433,48 +730,79 @@ function renderBigGlyph(pitch: PitchClass): string {
   return `${above}${label}${below}`;
 }
 
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 function layout(): string {
   return `
     <header class="header">
       <p class="tamil">ஸ்வர கண்ணாடி</p>
       <h1 class="english">Swara Mirror</h1>
-      <p class="tagline">Sing a melody — an Ilayaraja pallavi, a scale, anything — and watch the swaras appear as you go.</p>
+      <p class="tagline">Tap once, then sing. Swaras appear as you hold a note.</p>
       <div class="gold-rule" aria-hidden="true"></div>
     </header>
 
     <section class="card swara-stage" aria-live="polite">
-      <div id="live-pill" class="live-pill" hidden><span class="dot"></span><span>Listening</span></div>
-      <p id="big-swara" class="big-swara">S</p>
+      <button id="btn-listen" class="primary sing-btn" type="button">Tap to sing</button>
+      <div id="live-pill" class="live-pill" hidden><span class="dot"></span><span>Listening… sing now</span></div>
+      <div id="cal-panel" class="cal-panel live-panel" hidden>
+        <div class="level-meter" aria-hidden="true"><div id="level-fill" class="level-fill"></div></div>
+        <p id="listen-timer" class="listen-timer">0:00</p>
+        <p id="cal-hearing" class="cal-hearing">Listening… sing now</p>
+        <div id="cal-progress" class="cal-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Sa detection progress">
+          <div id="cal-progress-fill" class="cal-progress-fill"></div>
+        </div>
+      </div>
+      <div class="pitch-pair">
+        <p id="big-swara" class="big-swara">S</p>
+        <p id="western-note" class="western-note">C#4</p>
+      </div>
       <p id="swara-name" class="swara-name"></p>
+      <p id="intonation" class="intonation"></p>
       <div class="cents-meter" aria-hidden="true">
         <div class="cents-track"></div>
         <div class="cents-center"></div>
         <div id="cents-needle" class="cents-needle" style="left: 50%"></div>
       </div>
       <div id="cents-label" class="cents-label">— cents</div>
-      <div id="cal-panel" class="cal-panel" hidden>
-        <div class="level-meter" aria-hidden="true"><div id="level-fill" class="level-fill"></div></div>
-        <p id="cal-hearing" class="cal-hearing">Sing a steady Sa…</p>
-        <div id="cal-progress" class="cal-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Sa calibration progress">
-          <div id="cal-progress-fill" class="cal-progress-fill"></div>
-        </div>
-      </div>
-      <div class="staff-wrap">
+      <div class="staff-wrap no-print">
         <canvas id="staff" width="720" height="220" aria-label="Scrolling swara line"></canvas>
       </div>
     </section>
 
     <section class="card">
       <p class="notation-label">Notation</p>
+      <div class="format-toggle no-print" role="radiogroup" aria-label="Notation format">
+        <button type="button" role="radio" data-format="swara">Swara</button>
+        <button type="button" role="radio" data-format="keyboard">Keyboard notes</button>
+        <button type="button" role="radio" data-format="both">Both</button>
+      </div>
       <div id="notation-strip" class="notation-strip empty"></div>
-      <div class="row">
+      <div class="row no-print">
         <button id="btn-copy" type="button">Copy notation</button>
         <button id="btn-play" type="button">Play notation</button>
         <button id="btn-clear" type="button">Clear</button>
       </div>
+      <div class="piano-wrap no-print">
+        <p class="notation-label">Keyboard</p>
+        <div id="piano"></div>
+        <p id="step-label" class="status">Play or step through the captured notation to see the next key.</p>
+        <div class="row">
+          <button id="btn-prev" type="button">Previous key</button>
+          <button id="btn-next" type="button">Next key</button>
+        </div>
+      </div>
     </section>
 
-    <section class="card">
+    <details class="card settings-panel no-print">
+      <summary>Settings</summary>
+      <p class="notation-label">Skill level</p>
+      <div class="level-toggle" role="radiogroup" aria-label="Skill level">
+        <button type="button" role="radio" data-level="beginner">Beginner</button>
+        <button type="button" role="radio" data-level="intermediate">Intermediate</button>
+        <button type="button" role="radio" data-level="advanced">Advanced</button>
+      </div>
       <p class="notation-label">Your Sa</p>
       <div class="sa-row">
         <label>
@@ -484,13 +812,24 @@ function layout(): string {
         <button id="btn-set-sa" type="button">Set my Sa</button>
       </div>
       <p id="sa-readout" class="sa-readout"></p>
-      <div class="row">
-        <button id="btn-listen" class="primary" type="button">Start listening</button>
-      </div>
       <p id="status" class="status"></p>
       <p id="error" class="error" role="alert"></p>
+    </details>
+
+    <section class="card no-print">
+      <p class="notation-label">Save</p>
+      <label>
+        <span class="visually-hidden" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Song title</span>
+        <input id="song-title" class="title-input" type="text" maxlength="80" placeholder="Optional song title" autocomplete="off" />
+      </label>
+      <div class="row">
+        <button id="btn-download" type="button">Download .txt</button>
+        <button id="btn-print" type="button">Print / PDF</button>
+      </div>
     </section>
 
-    <p class="privacy"><strong>Your voice stays on this device.</strong> Pitch is detected in the browser. Nothing is uploaded, and no AI service is used.</p>
+    <section id="print-sheet" class="print-sheet"></section>
+
+    <p class="privacy no-print"><strong>Your voice stays on this device.</strong> Pitch is detected in the browser. Nothing is uploaded, and no AI service is used. Only your skill-level preference is remembered on this device.</p>
   `;
 }

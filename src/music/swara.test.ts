@@ -7,6 +7,7 @@ import {
   SA_DROPDOWN_NOTES,
   swaraToHz,
   SWARA_NAMES,
+  swaraToWesternNote,
   westernNoteToHz,
   westernNoteToMidi,
 } from './swara';
@@ -192,5 +193,53 @@ describe('DisplaySmoother', () => {
     const s = new DisplaySmoother(80);
     s.update(0, hzToSwara(SA, SA));
     expect(s.update(10, null)).toBeNull();
+  });
+});
+
+
+describe('swara → western note names relative to Sa', () => {
+  it('maps a C4 Sa to C major letter names', () => {
+    const sa = westernNoteToHz('C4');
+    expect(swaraToWesternNote('S', 0, sa)).toBe('C4');
+    expect(swaraToWesternNote('R1', 0, sa)).toBe('C#4');
+    expect(swaraToWesternNote('R2', 0, sa)).toBe('D4');
+    expect(swaraToWesternNote('G3', 0, sa)).toBe('E4');
+    expect(swaraToWesternNote('P', 0, sa)).toBe('G4');
+    expect(swaraToWesternNote('N3', 0, sa)).toBe('B4');
+    expect(swaraToWesternNote('S', 1, sa)).toBe('C5');
+    expect(swaraToWesternNote('N3', -1, sa)).toBe('B3');
+  });
+
+  it('shifts with Sa, including a C#4 tonic', () => {
+    const sa = westernNoteToHz('C#4');
+    expect(swaraToWesternNote('S', 0, sa)).toBe('C#4');
+    expect(swaraToWesternNote('R2', 0, sa)).toBe('D#4');
+    expect(swaraToWesternNote('G3', 0, sa)).toBe('F4');
+    expect(swaraToWesternNote('P', 0, sa)).toBe('G#4');
+    expect(swaraToWesternNote('S', 1, sa)).toBe('C#5');
+  });
+
+  it('maps a G3 Sa across octaves', () => {
+    const sa = westernNoteToHz('G3');
+    expect(swaraToWesternNote('S', 0, sa)).toBe('G3');
+    expect(swaraToWesternNote('P', 0, sa)).toBe('D4');
+    expect(swaraToWesternNote('S', -1, sa)).toBe('G2');
+    expect(swaraToWesternNote('R2', 1, sa)).toBe('A4');
+  });
+});
+
+
+describe('NotationCollector.remapSa', () => {
+  it('relabels a line when Sa moves to the first sung note', () => {
+    const c4 = westernNoteToHz('C#4');
+    const a3 = westernNoteToHz('A3');
+    const c = new NotationCollector({ holdMs: 80, restMs: 200 });
+    // Sung A3 is D1-ish under a C#4 Sa, then we learn Sa is A3.
+    const pitch = hzToSwara(a3, c4);
+    c.update(0, pitch);
+    c.update(80, pitch);
+    expect(c.toAsciiText()).not.toBe('S');
+    c.remapSa(c4, a3);
+    expect(c.toAsciiText()).toBe('S');
   });
 });

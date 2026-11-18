@@ -1,6 +1,9 @@
 import {
   formatSwaraAscii,
   formatSwaraGlyph,
+  hzToSwara,
+  swaraToHz,
+  swaraToWesternNote,
   type PitchClass,
   type SwaraName,
 } from './swara';
@@ -40,8 +43,8 @@ function samePitch(a: { swara: SwaraName; octave: number }, b: { swara: SwaraNam
  * notation strip. Feed it regularly with `update`; pass null when unvoiced.
  */
 export class NotationCollector {
-  private readonly holdMs: number;
-  private readonly restMs: number;
+  private holdMs: number;
+  private restMs: number;
   private events: NotationEvent[] = [];
   private candidate: { swara: SwaraName; octave: number; sinceMs: number } | null = null;
   private unvoicedSinceMs: number | null = null;
@@ -75,6 +78,22 @@ export class NotationCollector {
     return this.events
       .map((e) => (e.type === 'rest' ? '-' : formatSwaraAscii(e.swara, e.octave)))
       .join(' ');
+  }
+
+  setTiming(options: NotationOptions): void {
+    if (options.holdMs !== undefined) this.holdMs = options.holdMs;
+    if (options.restMs !== undefined) this.restMs = options.restMs;
+  }
+
+  /** Rewrites captured swaras after Sa changes, keeping the same sung pitches. */
+  remapSa(fromSaHz: number, toSaHz: number): void {
+    if (!(fromSaHz > 0) || !(toSaHz > 0)) return;
+    const remap = (swara: SwaraName, octave: number) => {
+      const next = hzToSwara(swaraToHz(swara, octave, fromSaHz), toSaHz);
+      return { swara: next.swara, octave: next.octave };
+    };
+    this.events = this.events.map((ev) => (ev.type === 'note' ? { ...ev, ...remap(ev.swara, ev.octave) } : ev));
+    if (this.candidate) this.candidate = { ...this.candidate, ...remap(this.candidate.swara, this.candidate.octave) };
   }
 
   clear(): void {
@@ -156,7 +175,11 @@ export class DisplaySmoother {
   private current: PitchClass | null = null;
   private pending: { pitch: PitchClass; sinceMs: number } | null = null;
 
-  constructor(private readonly holdMs: number = 80) {}
+  constructor(private holdMs: number = 80) {}
+
+  setHoldMs(holdMs: number): void {
+    this.holdMs = holdMs;
+  }
 
   update(timeMs: number, pitch: PitchClass | null): PitchClass | null {
     if (!pitch) {
@@ -233,3 +256,38 @@ export function compactSwaraSequence(events: readonly NotationEvent[]): string[]
   }
   return out;
 }
+
+
+export type NotationFormat = 'swara' | 'keyboard' | 'both';
+
+export function formatNoteEvent(
+  ev: NoteEvent,
+  saHz: number,
+  format: NotationFormat,
+): string {
+  const sw = formatSwaraGlyph(ev.swara, ev.octave);
+  if (format === 'swara') return sw;
+  const key = swaraToWesternNote(ev.swara, ev.octave, saHz);
+  if (format === 'keyboard') return key;
+  return `${sw} (${key})`;
+}
+
+export function formatNotationLine(
+  events: readonly NotationEvent[],
+  saHz: number,
+  format: NotationFormat,
+): string {
+  return events
+    .map((e) => (e.type === 'rest' ? '-' : formatNoteEvent(e, saHz, format)))
+    .join(' ');
+}
+
+export function formatKeyboardAscii(
+  events: readonly NotationEvent[],
+  saHz: number,
+): string {
+  return events
+    .map((e) => (e.type === 'rest' ? '-' : swaraToWesternNote(e.swara, e.octave, saHz)))
+    .join(' ');
+}
+

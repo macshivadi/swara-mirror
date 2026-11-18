@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { byteToFloatTimeDomain } from './pitchTracker';
 import { synthesizeSine, synthesizeVoice, yinDetect } from './yin';
 
 function detect(freq: number, sampleRate = 44100, length = 4096) {
@@ -83,5 +84,18 @@ describe('yinDetect on sung-like (vibrato / noisy) sines', () => {
     const buf = synthesizeVoice(196, 48000, 4096, { amplitude: 0.15, vibratoHz: 6, vibratoCents: 40, noise: 0.03, seed: 11 });
     const result = yinDetect(buf, 48000, { threshold: 0.32 });
     nearly(result.frequency, 196, 60);
+  });
+});
+
+
+describe('byteToFloatTimeDomain', () => {
+  it('maps 128 to silence and 255 near full scale', () => {
+    const bytes = Uint8Array.from([128, 255, 0, 192]);
+    const out = new Float32Array(4);
+    byteToFloatTimeDomain(bytes, out);
+    expect(out[0]).toBe(0);
+    expect(out[1]).toBeCloseTo(0.992, 2);
+    expect(out[2]).toBe(-1);
+    expect(out[3]).toBeCloseTo(0.5, 2);
   });
 });

@@ -8,12 +8,12 @@ Pitch detection runs entirely in the browser (Web Audio API + the YIN algorithm)
 
 ## How to use
 
-1. Pick your Sa from the list, or tap **Set my Sa** and sing a steady note for about 1½ seconds.
-2. Tap **Start listening** and allow the microphone.
-3. Sing (your voice alone works best — a backing track will confuse the detector).
-4. Stable swaras collect in the notation strip. Copy, clear, or play them back as sine tones.
+1. Tap **Tap to sing** and allow the microphone.
+2. Sing. Notation appears as you hold a note. If you haven’t set Sa, the first steady note becomes Sa (or it keeps C# until then) — listening never stops in between.
+3. A live timer, level meter, and “too quiet — move closer” hint show that the mic is still running. Tap **Stop** when you are done.
+4. Copy, play, step through, or download the notation. Sa, skill level, and **Set my Sa** live under **Settings**.
 
-Swara labels use the common 12-semitone mapping relative to your Sa: S, R₁, R₂, G₂, G₃, M₁, M₂, P, D₁, D₂, N₂, N₃. A dot below is mandra; a dot above is tara. A cents needle shows how sharp or flat you are of the nearest swara.
+Swara labels use the common 12-semitone mapping relative to your Sa: S, R₁, R₂, G₂, G₃, M₁, M₂, P, D₁, D₂, N₂, N₃. A dot below is mandra; a dot above is tara. Beginner, Intermediate, and Advanced change how tightly notes snap and how long a note must be held.
 
 Mid-phrase gamakas are smoothed so the written line doesn’t jitter on every oscillation. Fine raga detail is not annotated.
 

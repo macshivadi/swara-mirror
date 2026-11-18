@@ -118,6 +118,15 @@ export function swaraToHz(swara: SwaraName, octave: number, saHz: number): numbe
   return saHz * 2 ** ((octave * 12 + semitone) / 12);
 }
 
+/** Western note name with octave, e.g. C#4, derived from Sa. */
+export function swaraToWesternNote(swara: SwaraName, octave: number, saHz: number, a4: number = A4_HZ): string {
+  return hzToWesternNote(swaraToHz(swara, octave, saHz), a4).note;
+}
+
+export function swaraToMidi(swara: SwaraName, octave: number, saHz: number, a4: number = A4_HZ): number {
+  return Math.round(hzToMidi(swaraToHz(swara, octave, saHz), a4));
+}
+
 export function formatSwaraGlyph(swara: SwaraName, octave: number): string {
   const base = SWARA_INFO[swara].short;
   if (octave <= -2) return `${base}̣̣`;

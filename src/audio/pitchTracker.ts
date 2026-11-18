@@ -47,8 +47,10 @@ export class PitchTracker {
   private ctx: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
   private inputGain: GainNode | null = null;
-  private buffer: Float32Array<ArrayBuffer> | null = null;
-  private work: Float32Array<ArrayBuffer> | null = null;
+  private silentGain: GainNode | null = null;
+  private buffer: Float32Array | null = null;
+  private work: Float32Array | null = null;
+  private byteBuffer: Uint8Array | null = null;
   private micStream: MediaStream | null = null;
   private micSource: MediaStreamAudioSourceNode | null = null;
   private testOsc: OscillatorNode | null = null;
@@ -56,6 +58,8 @@ export class PitchTracker {
   private injectedHz: number | null = null;
   private injectedRms = 0.2;
   private mode: TrackerMode = 'listen';
+  private wantMic = false;
+  private recovering = false;
   private readonly octave = new OctaveStabilizer(S.octaveConfirmMs);
   private readonly opts: Required<TrackerOptions>;
 
@@ -77,6 +81,14 @@ export class PitchTracker {
     return this.ctx;
   }
 
+  get sampleRate(): number {
+    return this.ctx?.sampleRate ?? 0;
+  }
+
+  get contextState(): string {
+    return this.ctx?.state ?? 'closed';
+  }
+
   isMicLive(): boolean {
     return Boolean(this.micStream && this.micStream.getAudioTracks().some((t) => t.readyState === 'live'));
   }
@@ -89,11 +101,22 @@ export class PitchTracker {
     return this.mode;
   }
 
-  async ensureContext(): Promise<AudioContext> {
+  /**
+   * Must run in the same synchronous turn as a user tap on iOS Safari.
+   * Creates the context (if needed) and kicks off resume() before any await.
+   */
+  primeFromUserGesture(): AudioContext {
+    const ctx = this.ensureContextSync();
+    void this.resume();
+    return ctx;
+  }
+
+  ensureContextSync(): AudioContext {
     if (!this.ctx) {
       const Ctor =
         window.AudioContext ||
         (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      // Do not pass sampleRate — iOS typically runs at 48 kHz and YIN uses ctx.sampleRate.
       this.ctx = new Ctor({ latencyHint: 'interactive' });
       this.analyser = this.ctx.createAnalyser();
       this.analyser.fftSize = this.opts.fftSize;
@@ -101,32 +124,100 @@ export class PitchTracker {
       this.inputGain = this.ctx.createGain();
       this.inputGain.gain.value = S.inputGain;
       this.inputGain.connect(this.analyser);
+      // Safari stops processing a graph that isn't connected to destination,
+      // often after a second or two of apparent life.
+      this.silentGain = this.ctx.createGain();
+      this.silentGain.gain.value = 0;
+      this.analyser.connect(this.silentGain);
+      this.silentGain.connect(this.ctx.destination);
       this.buffer = new Float32Array(new ArrayBuffer(this.analyser.fftSize * 4));
       this.work = new Float32Array(new ArrayBuffer(this.analyser.fftSize * 4));
+      this.byteBuffer = new Uint8Array(new ArrayBuffer(this.analyser.fftSize));
+      this.ctx.addEventListener('statechange', () => {
+        if (this.needsResume() && (this.wantMic || this.testOsc)) void this.resume();
+      });
     }
-    if (this.ctx.state === 'suspended') {
-      await this.ctx.resume();
-    }
+    if (this.needsResume()) void this.ctx.resume();
     return this.ctx;
   }
 
-  async startMic(): Promise<void> {
-    const ctx = await this.ensureContext();
-    if (this.isMicLive() && this.micSource) {
-      if (ctx.state === 'suspended') await ctx.resume();
-      return;
-    }
-    this.stopMic();
-    const stream = await requestMicStream();
-    if (ctx.state === 'suspended') await ctx.resume();
-    this.micStream = stream;
-    this.micSource = ctx.createMediaStreamSource(stream);
-    this.micSource.connect(this.inputGain ?? this.analyser!);
-    // iOS can suspend again after getUserMedia resolves.
-    if (ctx.state === 'suspended') await ctx.resume();
+  async ensureContext(): Promise<AudioContext> {
+    const ctx = this.ensureContextSync();
+    await this.resume();
+    return ctx;
   }
 
-  stopMic(): void {
+  async startMic(): Promise<void> {
+    this.wantMic = true;
+    const ctx = this.ensureContextSync();
+    if (this.isMicLive() && this.micSource) {
+      await this.resume();
+      return;
+    }
+    this.releaseMicNodes();
+    const stream = await requestMicStream();
+    if (!this.wantMic) {
+      for (const track of stream.getTracks()) track.stop();
+      return;
+    }
+    await this.resume();
+    this.micStream = stream;
+    for (const track of stream.getAudioTracks()) {
+      track.enabled = true;
+      this.watchTrack(track);
+    }
+    this.micSource = ctx.createMediaStreamSource(stream);
+    this.micSource.connect(this.inputGain ?? this.analyser!);
+    // iOS often interrupts the context after the permission prompt.
+    await this.resume();
+  }
+
+  /** Safe to call often; no-ops if the context is already running. */
+  async resume(): Promise<void> {
+    if (!this.ctx || this.ctx.state === 'closed') return;
+    if (this.needsResume()) {
+      try {
+        await this.ctx.resume();
+      } catch {
+        /* ignore — try again on the next tick or gesture */
+      }
+    }
+  }
+
+  private needsResume(): boolean {
+    const state = this.ctx?.state as string | undefined;
+    return state === 'suspended' || state === 'interrupted';
+  }
+
+  private watchTrack(track: MediaStreamTrack): void {
+    track.addEventListener('ended', () => {
+      if (this.wantMic) void this.recoverMic();
+    });
+    track.addEventListener('mute', () => {
+      if (this.wantMic) void this.resume();
+    });
+    track.addEventListener('unmute', () => {
+      if (!this.wantMic) return;
+      track.enabled = true;
+      void this.resume();
+    });
+  }
+
+  private async recoverMic(): Promise<void> {
+    if (!this.wantMic || this.recovering) return;
+    this.recovering = true;
+    try {
+      this.releaseMicNodes();
+      await this.startMic();
+    } catch {
+      /* permission or device is gone; the UI keeps the timer running */
+    } finally {
+      this.recovering = false;
+    }
+  }
+
+  /** Drop the current source/tracks without clearing the "keep listening" flag. */
+  private releaseMicNodes(): void {
     if (this.micSource) {
       try {
         this.micSource.disconnect();
@@ -136,9 +227,20 @@ export class PitchTracker {
       this.micSource = null;
     }
     if (this.micStream) {
-      for (const track of this.micStream.getTracks()) track.stop();
+      for (const track of this.micStream.getTracks()) {
+        try {
+          track.stop();
+        } catch {
+          /* ignore */
+        }
+      }
       this.micStream = null;
     }
+  }
+
+  stopMic(): void {
+    this.wantMic = false;
+    this.releaseMicNodes();
   }
 
   /**
@@ -193,6 +295,7 @@ export class PitchTracker {
   }
 
   read(nowMs: number = performance.now()): TrackerReading {
+    if (this.needsResume()) void this.resume();
     if (this.injectedHz !== null) {
       const frequency = this.octave.update(nowMs, this.injectedHz);
       return {
@@ -207,9 +310,8 @@ export class PitchTracker {
     if (!this.analyser || !this.buffer || !this.work || !this.ctx) {
       return { frequency: null, rawFrequency: null, probability: 0, rms: 0, level: 0, timeMs: nowMs };
     }
-    const buf = this.buffer;
-    this.analyser.getFloatTimeDomainData(buf);
-    const levelRms = rms(buf);
+    this.fillTimeDomain(this.buffer);
+    const levelRms = rms(this.buffer);
     const minRms = this.mode === 'calibrate' ? this.opts.calibrateMinRms : this.opts.minRms;
     if (levelRms < minRms) {
       this.octave.update(nowMs, null);
@@ -223,7 +325,11 @@ export class PitchTracker {
       };
     }
 
-    applyMakeupGain(buf, this.work, { floorRms: minRms * 0.5, targetRms: S.makeupTargetRms, maxGain: S.makeupMaxGain });
+    applyMakeupGain(this.buffer, this.work, {
+      floorRms: minRms * 0.5,
+      targetRms: S.makeupTargetRms,
+      maxGain: S.makeupMaxGain,
+    });
     const threshold = this.mode === 'calibrate' ? this.opts.calibrateThreshold : this.opts.threshold;
     const minProbability =
       this.mode === 'calibrate' ? this.opts.calibrateMinProbability : this.opts.minProbability;
@@ -244,6 +350,28 @@ export class PitchTracker {
     };
   }
 
+  /**
+   * Prefer getFloatTimeDomainData; fall back to the byte API used by older
+   * WebKit, or when the float read comes back empty while the byte read has signal.
+   */
+  private fillTimeDomain(buf: Float32Array): void {
+    const analyser = this.analyser!;
+    let usedFloat = false;
+    if (typeof analyser.getFloatTimeDomainData === 'function') {
+      try {
+        analyser.getFloatTimeDomainData(buf as Float32Array<ArrayBuffer>);
+        usedFloat = true;
+      } catch {
+        usedFloat = false;
+      }
+    }
+    if (usedFloat && hasSignal(buf)) return;
+    if (!this.byteBuffer || typeof analyser.getByteTimeDomainData !== 'function') return;
+    analyser.getByteTimeDomainData(this.byteBuffer as Uint8Array<ArrayBuffer>);
+    if (usedFloat && !byteHasSignal(this.byteBuffer)) return;
+    byteToFloatTimeDomain(this.byteBuffer, buf);
+  }
+
   resetStabilizer(): void {
     this.octave.reset();
   }
@@ -253,15 +381,38 @@ export class PitchTracker {
     this.stopTestTone();
     this.injectedHz = null;
     this.octave.reset();
-    if (this.ctx) {
+    if (this.ctx && this.ctx.state !== 'closed') {
       await this.ctx.close();
-      this.ctx = null;
     }
+    this.ctx = null;
     this.analyser = null;
     this.inputGain = null;
+    this.silentGain = null;
     this.buffer = null;
     this.work = null;
+    this.byteBuffer = null;
   }
+}
+
+export function byteToFloatTimeDomain(bytes: Uint8Array, out: Float32Array): void {
+  const n = Math.min(bytes.length, out.length);
+  for (let i = 0; i < n; i++) {
+    out[i] = (bytes[i]! - 128) / 128;
+  }
+}
+
+function hasSignal(buf: Float32Array): boolean {
+  for (let i = 0; i < buf.length; i++) {
+    if (Math.abs(buf[i]!) > 1e-5) return true;
+  }
+  return false;
+}
+
+function byteHasSignal(bytes: Uint8Array): boolean {
+  for (let i = 0; i < bytes.length; i++) {
+    if (Math.abs(bytes[i]! - 128) > 1) return true;
+  }
+  return false;
 }
 
 async function requestMicStream(): Promise<MediaStream> {
@@ -269,14 +420,14 @@ async function requestMicStream(): Promise<MediaStream> {
     audio: {
       echoCancellation: false,
       noiseSuppression: false,
-      autoGainControl: false,
-      channelCount: 1,
+      // Phone mics are often too quiet with AGC off, so notes never trigger.
+      autoGainControl: true,
     },
   };
   try {
     return await navigator.mediaDevices.getUserMedia(preferred);
   } catch {
-    // Safari / some Android builds reject the boolean-false constraint set.
+    // Safari / some Android builds reject a strict constraint set.
     return await navigator.mediaDevices.getUserMedia({ audio: true });
   }
 }

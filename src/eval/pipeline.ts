@@ -33,7 +33,14 @@ export interface PipelineResult {
   voicedFrameCount: number;
 }
 
-export interface RunPipelineOptions {
+export interface NotationSettings {
+  notationHoldMs?: number;
+  notationRestMs?: number;
+  hysteresisCents?: number;
+  displayHoldMs?: number;
+}
+
+export interface RunPipelineOptions extends NotationSettings {
   saHz: number;
   hopSize?: number;
   fftSize?: number;
@@ -56,9 +63,10 @@ export function runPipeline(
   const minProbability = mode === 'calibrate' ? S.calibrateMinProbability : S.listenMinProbability;
   const minRms = mode === 'calibrate' ? S.calibrateMinRms : S.listenMinRms;
 
+  const notation = resolveNotationSettings(options);
   const octave = new OctaveStabilizer(S.octaveConfirmMs);
-  const smoother = new DisplaySmoother(S.displayHoldMs);
-  const collector = new NotationCollector({ holdMs: S.notationHoldMs, restMs: S.notationRestMs });
+  const smoother = new DisplaySmoother(notation.displayHoldMs);
+  const collector = new NotationCollector({ holdMs: notation.notationHoldMs, restMs: notation.notationRestMs });
   let sticky: PitchClass | null = null;
 
   const frames: PipelineFrame[] = [];
@@ -93,7 +101,7 @@ export function runPipeline(
     }
 
     const classified = frequency ? hzToSwara(frequency, options.saHz) : null;
-    const held: PitchClass | null = classified ? withHysteresis(sticky, classified, S.hysteresisCents) : null;
+    const held: PitchClass | null = classified ? withHysteresis(sticky, classified, notation.hysteresisCents) : null;
     sticky = held;
     const display = smoother.update(timeMs, held);
     collector.update(timeMs, held);
@@ -113,5 +121,48 @@ export function runPipeline(
     events: [...collector.getEvents()],
     sequence: compactSwaraSequence(collector.getEvents()),
     voicedFrameCount: frames.filter((f) => f.frequency !== null).length,
+  };
+}
+
+export function resolveNotationSettings(options: NotationSettings = {}): Required<NotationSettings> {
+  return {
+    notationHoldMs: options.notationHoldMs ?? S.notationHoldMs,
+    notationRestMs: options.notationRestMs ?? S.notationRestMs,
+    hysteresisCents: options.hysteresisCents ?? S.hysteresisCents,
+    displayHoldMs: options.displayHoldMs ?? S.displayHoldMs,
+  };
+}
+
+/** Re-run only the notation stage on an already-detected frequency stream. */
+export function notateFrames(
+  frames: readonly Pick<PipelineFrame, 'timeMs' | 'frequency'>[],
+  saHz: number,
+  options: NotationSettings = {},
+): PipelineResult {
+  const notation = resolveNotationSettings(options);
+  const smoother = new DisplaySmoother(notation.displayHoldMs);
+  const collector = new NotationCollector({ holdMs: notation.notationHoldMs, restMs: notation.notationRestMs });
+  let sticky: PitchClass | null = null;
+  const out: PipelineFrame[] = [];
+  for (const fr of frames) {
+    const classified = fr.frequency ? hzToSwara(fr.frequency, saHz) : null;
+    const held: PitchClass | null = classified ? withHysteresis(sticky, classified, notation.hysteresisCents) : null;
+    sticky = held;
+    const display = smoother.update(fr.timeMs, held);
+    collector.update(fr.timeMs, held);
+    out.push({
+      timeMs: fr.timeMs,
+      frequency: fr.frequency,
+      rawFrequency: fr.frequency,
+      probability: fr.frequency ? 1 : 0,
+      rms: 0,
+      pitch: display,
+    });
+  }
+  return {
+    frames: out,
+    events: [...collector.getEvents()],
+    sequence: compactSwaraSequence(collector.getEvents()),
+    voicedFrameCount: out.filter((f) => f.frequency !== null).length,
   };
 }

@@ -5,6 +5,7 @@ export interface PlaybackOptions {
   saHz: number;
   /** Default length for a note with unknown/very short duration. */
   beatMs?: number;
+  onEvent?: (event: NotationEvent, index: number) => void;
 }
 
 /**
@@ -49,8 +50,10 @@ export async function playNotation(
   };
 
   void (async () => {
-    for (const ev of events) {
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i]!;
       if (cancelled) break;
+      options.onEvent?.(ev, i);
       if (ev.type === 'rest') {
         const wait = clamp(ev.durationMs, 120, 600);
         await sleep(wait);
@@ -58,7 +61,7 @@ export async function playNotation(
       }
       const freq = swaraToHz(ev.swara, ev.octave, options.saHz);
       const dur = clamp(ev.durationMs || beatMs, 160, 800);
-      if (!cancelled) tone(ctx, master, freq, dur / 1000);
+      if (!cancelled) startTone(ctx, master, freq, dur / 1000);
       await sleep(dur + 30);
     }
     if (!cancelled) stop();
@@ -67,7 +70,7 @@ export async function playNotation(
   return { stopped, stop };
 }
 
-function tone(ctx: AudioContext, dest: AudioNode, frequency: number, durationSec: number): void {
+function startTone(ctx: AudioContext, dest: AudioNode, frequency: number, durationSec: number): void {
   const osc = ctx.createOscillator();
   const env = ctx.createGain();
   osc.type = 'sine';
@@ -97,4 +100,24 @@ function clamp(n: number, min: number, max: number): number {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Play a single tone. Must be called from a user-gesture stack on iOS. */
+export async function playFreq(
+  ctx: AudioContext,
+  frequency: number,
+  durationMs = 400,
+  gainValue = 0.18,
+): Promise<void> {
+  if (ctx.state === 'suspended') await ctx.resume();
+  const master = ctx.createGain();
+  master.gain.value = gainValue;
+  master.connect(ctx.destination);
+  startTone(ctx, master, frequency, durationMs / 1000);
+  await new Promise((resolve) => setTimeout(resolve, durationMs + 40));
+  try {
+    master.disconnect();
+  } catch {
+    /* ignore */
+  }
 }
