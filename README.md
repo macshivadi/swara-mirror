@@ -33,3 +33,7 @@ The dev and preview servers use the GitHub Pages base path `/swara-mirror/`.
 ## Deploy
 
 Pushes to `main` run tests, typecheck, and build, then publish `dist/` to GitHub Pages via GitHub Actions.
+
+## Offline accuracy
+
+`npm run eval:singing` runs the same pitch pipeline against the [vocadito](https://zenodo.org/records/5578807) solo-vocal set (CC BY 4.0). Download and extract it to `eval/data/` (gitignored). Results are summarized in `eval/RESULTS.md`. Audio is not committed.

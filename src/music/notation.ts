@@ -197,3 +197,39 @@ export class DisplaySmoother {
     this.pending = null;
   }
 }
+
+
+/**
+ * Stay on the previous swara until the new one is clearly past the
+ * boundary, so brief consonant onsets and gamaka wobble don't spawn
+ * neighbour notes.
+ */
+export function withHysteresis(
+  prev: PitchClass | null,
+  next: PitchClass,
+  hysteresisCents = 18,
+): PitchClass {
+  if (!prev) return next;
+  if (prev.swara === next.swara && prev.octave === next.octave) return next;
+  const prevCenter = (prev.octave * 12 + prev.semitone) * 100;
+  if (Math.abs(next.totalCents - prevCenter) < 50 + hysteresisCents) {
+    return {
+      ...prev,
+      frequency: next.frequency,
+      totalCents: next.totalCents,
+      cents: next.totalCents - prevCenter,
+    };
+  }
+  return next;
+}
+
+/** ASCII tokens without rests, merging immediate repeats. */
+export function compactSwaraSequence(events: readonly NotationEvent[]): string[] {
+  const out: string[] = [];
+  for (const ev of events) {
+    if (ev.type !== 'note') continue;
+    const tok = formatSwaraAscii(ev.swara, ev.octave);
+    if (out[out.length - 1] !== tok) out.push(tok);
+  }
+  return out;
+}

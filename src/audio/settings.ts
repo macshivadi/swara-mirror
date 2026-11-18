@@ -1,0 +1,20 @@
+/** Shared live/offline pipeline settings so the eval harness matches the app. */
+export const AUDIO_SETTINGS = {
+  fftSize: 4096,
+  listenThreshold: 0.2,
+  listenMinProbability: 0.55,
+  listenMinRms: 0.008,
+  calibrateThreshold: 0.32,
+  calibrateMinProbability: 0.38,
+  calibrateMinRms: 0.003,
+  minHz: 70,
+  maxHz: 1200,
+  inputGain: 1.6,
+  makeupTargetRms: 0.15,
+  makeupMaxGain: 12,
+  octaveConfirmMs: 220,
+  displayHoldMs: 80,
+  notationHoldMs: 180,
+  notationRestMs: 280,
+  hysteresisCents: 18,
+} as const;

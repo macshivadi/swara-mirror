@@ -316,14 +316,67 @@ select {
   font-variant-numeric: tabular-nums;
 }
 
-.hint, .status, .error {
+.hint, .status, .error, .sa-readout, .cal-hearing {
   margin: 8px 0 0;
   font-size: 0.92rem;
   color: var(--ink-soft);
   min-height: 1.3em;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-wrap: break-word;
+  word-break: break-word;
+  line-height: 1.45;
 }
 
-.error { color: #9f1239; }
+.error {
+  color: #9f1239;
+  display: block;
+}
+
+.cal-panel {
+  margin: 12px 8px 4px;
+  text-align: center;
+}
+
+.level-meter {
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(68, 41, 22, 0.1);
+  overflow: hidden;
+  max-width: 280px;
+  margin: 0 auto;
+}
+
+.level-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #0f766e, #c45c14);
+  border-radius: inherit;
+  transition: width 80ms linear;
+}
+
+.cal-hearing {
+  margin: 8px 0 6px;
+  color: var(--ink-soft);
+}
+
+.cal-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(15, 118, 110, 0.15);
+  overflow: hidden;
+  max-width: 280px;
+  margin: 0 auto 4px;
+}
+
+.cal-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--listening);
+  border-radius: inherit;
+  transition: width 120ms linear;
+}
 
 .privacy {
   margin-top: 18px;

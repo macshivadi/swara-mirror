@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { synthesizeSine, yinDetect } from './yin';
+import { synthesizeSine, synthesizeVoice, yinDetect } from './yin';
 
 function detect(freq: number, sampleRate = 44100, length = 4096) {
   const buf = synthesizeSine(freq, sampleRate, length);
@@ -61,5 +61,27 @@ describe('yinDetect on synthetic sines', () => {
   it('is robust to phase and moderate amplitude', () => {
     const buf = synthesizeSine(392, 48000, 4096, { amplitude: 0.2, phase: 1.3 });
     nearly(yinDetect(buf, 48000).frequency, 392, 8);
+  });
+});
+
+
+describe('yinDetect on sung-like (vibrato / noisy) sines', () => {
+  it('tracks a 5.5 Hz, 30-cent vibrato around A3', () => {
+    const buf = synthesizeVoice(220, 44100, 8192, { vibratoHz: 5.5, vibratoCents: 30, amplitude: 0.3, seed: 3 });
+    const result = yinDetect(buf, 44100, { threshold: 0.32 });
+    nearly(result.frequency, 220, 40);
+    expect(result.probability).toBeGreaterThan(0.4);
+  });
+
+  it('tracks a quiet tone under additive noise', () => {
+    const buf = synthesizeVoice(261.63, 44100, 8192, { amplitude: 0.2, noise: 0.05, vibratoHz: 5, vibratoCents: 20, seed: 9 });
+    const result = yinDetect(buf, 44100, { threshold: 0.32 });
+    nearly(result.frequency, 261.63, 50);
+  });
+
+  it('still returns a usable pitch for a short mid-frequency vowel-like tone', () => {
+    const buf = synthesizeVoice(196, 48000, 4096, { amplitude: 0.15, vibratoHz: 6, vibratoCents: 40, noise: 0.03, seed: 11 });
+    const result = yinDetect(buf, 48000, { threshold: 0.32 });
+    nearly(result.frequency, 196, 60);
   });
 });

@@ -156,3 +156,39 @@ export function synthesizeSine(
   }
   return buf;
 }
+
+
+/** A sung-like tone: carrier + vibrato, optional noise, optional amplitude. */
+export function synthesizeVoice(
+  frequency: number,
+  sampleRate: number,
+  length: number,
+  options: {
+    amplitude?: number;
+    vibratoHz?: number;
+    vibratoCents?: number;
+    noise?: number;
+    seed?: number;
+  } = {},
+): Float32Array {
+  const amplitude = options.amplitude ?? 0.35;
+  const vibratoHz = options.vibratoHz ?? 0;
+  const vibratoCents = options.vibratoCents ?? 0;
+  const noise = options.noise ?? 0;
+  let seed = options.seed ?? 1;
+  const rand = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 0x100000000;
+  };
+  const buf = new Float32Array(length);
+  let phase = 0;
+  for (let i = 0; i < length; i++) {
+    const t = i / sampleRate;
+    const cents = vibratoCents * Math.sin(2 * Math.PI * vibratoHz * t);
+    const inst = frequency * 2 ** (cents / 1200);
+    phase += (2 * Math.PI * inst) / sampleRate;
+    const n = noise > 0 ? (rand() * 2 - 1) * noise : 0;
+    buf[i] = amplitude * Math.sin(phase) + n;
+  }
+  return buf;
+}
