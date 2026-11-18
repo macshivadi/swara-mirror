@@ -95,6 +95,11 @@ export class PitchTracker {
     return Boolean(this.micStream && this.micStream.getAudioTracks().some((t) => t.readyState === 'live'));
   }
 
+  /** True when the tracker is supposed to keep (or restore) a microphone stream. */
+  wantsMic(): boolean {
+    return this.wantMic;
+  }
+
   /** True while tracks are stopped so playback can leave iOS play-and-record mode. */
   isMicHeld(): boolean {
     return this.micHeld;

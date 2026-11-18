@@ -32,6 +32,7 @@ import {
   type PitchClass,
 } from '../music/swara';
 import { playFreq, playNotation } from '../playback/synth';
+import { shouldKeepMicAfterCalibration } from './micPolicy';
 import { SwaraStaff } from './canvasStaff';
 import { PianoKeyboard } from './piano';
 
@@ -55,6 +56,8 @@ export interface MirrorState {
   listenElapsedMs: number;
   inputLevel: number;
   contextState: string;
+  micLive: boolean;
+  wantsMic: boolean;
 }
 
 export interface SwaraMirrorApi {
@@ -309,9 +312,14 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
   }
 
   function updateLiveMeter(meter: number, freq: number | null): void {
-    els.calPanel.hidden = !listening;
+    els.calPanel.hidden = !listening && !calibrating;
     els.levelFill.style.width = `${Math.round(meter * 100)}%`;
-    if (!listening) return;
+    if (!listening && !calibrating) return;
+    if (!listening && calibrating) {
+      if (freq) setLiveStatus(`Hearing a note near ${freq.toFixed(0)} Hz`);
+      else setLiveStatus('Sing a steady note — I’ll use it as Sa.');
+      return;
+    }
     if (meter < 0.1 && !freq) {
       setLiveStatus('Too quiet — move closer');
     } else if (!saLocked) {
@@ -366,7 +374,7 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
       } catch {
         /* keep the loop alive — a single DSP glitch must not stall listening */
       }
-      if (listening) raf = requestAnimationFrame(pump);
+      if (listening || calibrating) raf = requestAnimationFrame(pump);
     };
     raf = requestAnimationFrame(pump);
     pollTimer = window.setInterval(() => {
@@ -436,20 +444,34 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
 
   async function startCalibration(mode: 'mic' | 'silent' = 'mic'): Promise<void> {
     setError(null);
-    // Manual retake from Settings — do not stop listening or pause notation.
-    if (!listening) {
+    // Borrow the mic for Sa only. Never turn this into a Tap to sing session.
+    if (listening) {
+      await tracker.ensureContext();
+    } else {
       try {
-        await startListening(mode);
+        await prepareAudio(mode);
       } catch {
         return;
       }
-    } else {
-      await tracker.ensureContext();
+      startLoop();
     }
     saLocked = false;
     beginAutoSa('manual');
-    setListeningUi(true);
-    els.status.textContent = 'Sing a steady note — I’ll use it as Sa and keep listening.';
+    els.stage.classList.add('calibrating');
+    els.calPanel.hidden = false;
+    els.calProgress.hidden = false;
+    setLiveStatus('Sing a steady note — I’ll use it as Sa.');
+    els.status.textContent = 'Sing a steady note — I’ll use it as Sa.';
+  }
+
+  function endCalibrationMic(): void {
+    if (shouldKeepMicAfterCalibration(listening)) {
+      setListeningUi(true);
+      return;
+    }
+    tracker.stopMic();
+    stopLoop();
+    setListeningUi(false);
   }
 
   function lockSaFromCalibration(result: ReturnType<typeof evaluateCalibration>): void {
@@ -465,23 +487,27 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
         saLocked = true;
         setLiveStatus(`Using ${hzToWesternNote(saHz).note} as Sa — change it in Settings if you like`);
       }
-      setListeningUi(listening);
+      endCalibrationMic();
       return;
     }
     const previousSa = saHz;
     collector.remapSa(previousSa, result.snappedHz);
     setSa(result.snappedHz, result.snappedNote, true);
     setError(null);
-    const raw = result.medianHz !== null ? `heard ${result.medianHz.toFixed(1)} Hz, ` : '';
-    const msg = `Sa set to ${result.snappedNote} (${result.snappedHz.toFixed(1)} Hz; ${raw}keep singing)`;
+    const keep = shouldKeepMicAfterCalibration(listening);
+    const heard = result.medianHz !== null ? `; heard ${result.medianHz.toFixed(1)} Hz` : '';
+    const msg = keep
+      ? `Sa set to ${result.snappedNote} (${result.snappedHz.toFixed(1)} Hz${heard}; keep singing)`
+      : `Sa set to ${result.snappedNote} (${result.snappedHz.toFixed(1)} Hz${heard}).`;
     els.status.textContent = msg;
-    setLiveStatus(`Sa set to ${result.snappedNote} — keep singing`);
+    setLiveStatus(keep ? `Sa set to ${result.snappedNote} — keep singing` : `Sa set to ${result.snappedNote}`);
     saPrompt = null;
-    setListeningUi(listening);
+    endCalibrationMic();
+    void playSaReference(result.snappedHz);
   }
 
   function tick(now: number): void {
-    if (!listening) return;
+    if (!listening && !calibrating) return;
     if (now - lastTick < 12) return;
     lastTick = now;
     if (tracker.isMicHeld()) {
@@ -500,9 +526,11 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     stickyPitch = held;
     const display = smoother.update(now, held);
 
-    // Always write notation while the mic is open — never pause for Sa.
-    if (held) collector.update(now, held);
-    else collector.update(now, null);
+    // Write notation only during an explicit Tap to sing session.
+    if (listening) {
+      if (held) collector.update(now, held);
+      else collector.update(now, null);
+    }
 
     if (!saLocked || calibrating) {
       if (freq) calibrateSamples.push({ timeMs: now, frequency: freq });
@@ -538,7 +566,7 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
    */
   async function withPlayback<T>(fn: () => Promise<T>): Promise<T> {
     playbackHolds += 1;
-    if (listening && playbackHolds === 1) {
+    if ((listening || tracker.isMicLive() || tracker.isMicHeld()) && playbackHolds === 1) {
       tracker.pauseMic();
     }
     try {
@@ -553,6 +581,14 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
         }
       }
     }
+  }
+
+  async function playSaReference(hz: number): Promise<void> {
+    // Always duck/stop capture first so iOS can play the tone at full volume.
+    await withPlayback(async () => {
+      const ctx = await tracker.ensureContext();
+      await playFreq(ctx, hz, 420);
+    });
   }
 
   async function onListenClick(): Promise<void> {
@@ -699,6 +735,7 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
   els.saSelect.addEventListener('change', () => {
     setSa(westernNoteToHz(els.saSelect.value), els.saSelect.value);
     els.status.textContent = `Sa set to ${els.saSelect.value}.`;
+    void playSaReference(westernNoteToHz(els.saSelect.value));
   });
   root.querySelectorAll<HTMLButtonElement>('[data-level]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -749,6 +786,8 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
       listenElapsedMs: listening ? Math.max(0, performance.now() - listenStarted) : 0,
       inputLevel,
       contextState: tracker.contextState,
+      micLive: tracker.isMicLive(),
+      wantsMic: tracker.wantsMic(),
     }),
     getNotationAscii: () => collector.toAsciiText(),
     clearNotation: () => onClear(),
