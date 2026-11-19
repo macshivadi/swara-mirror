@@ -549,7 +549,7 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
       hint.hidden = !register.isWhistle();
     }
     const classified = freq ? hzToSwara(freq, saHz) : null;
-    const held = classified ? withHysteresis(stickyPitch, classified, level.hysteresisCents) : null;
+    const held = classified ? withHysteresis(stickyPitch, classified, level.hysteresisCents, level.escapeCents) : null;
     stickyPitch = held;
     const display = smoother.update(now, held);
 

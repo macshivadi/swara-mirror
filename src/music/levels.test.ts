@@ -43,7 +43,7 @@ describe('skill levels', () => {
     expect(settingsFor('intermediate').forgiving).toBe(false);
   });
 
-  it('uses a ~40-cent window and 250 ms minimum note when forgiving at beginner', () => {
+  it('uses a ~40-cent window and ~200 ms minimum note when forgiving at beginner', () => {
     const b = settingsFor('beginner', true);
     const i = settingsFor('intermediate', true);
     const a = settingsFor('advanced', true);
@@ -53,8 +53,10 @@ describe('skill levels', () => {
     expect(b.hysteresisCents).toBeGreaterThan(i.hysteresisCents);
     expect(i.hysteresisCents).toBeGreaterThan(a.hysteresisCents);
     for (const s of [b, i, a]) {
-      expect(s.notationHoldMs).toBeGreaterThanOrEqual(250);
+      expect(s.notationHoldMs).toBeGreaterThanOrEqual(180);
+      expect(s.notationHoldMs).toBeLessThanOrEqual(220);
       expect(s.medianFrames).toBeGreaterThanOrEqual(3);
+      expect(s.escapeCents).toBeLessThanOrEqual(80);
     }
     expect(settingsFor('beginner', false).medianFrames).toBe(0);
   });

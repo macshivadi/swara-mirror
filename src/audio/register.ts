@@ -100,11 +100,19 @@ export class KeyboardRegister {
   }
 }
 
-/** Running median of the last `size` voiced frequencies. */
+/** Running median of the last `size` voiced frequencies.
+ *  A single-frame spike is ignored; two consecutive frames in a new
+ *  region (default ≥80 cents from the current median) reset the buffer
+ *  so a real leap — a dip, a jump — is followed without lag.
+ */
 export class MedianFrequencySmoother {
   private buf: number[] = [];
+  private pendingJump: number | null = null;
+  private jumpCents: number;
 
-  constructor(private size = 5) {}
+  constructor(private size = 5, jumpCents = 80) {
+    this.jumpCents = jumpCents;
+  }
 
   setSize(size: number): void {
     this.size = Math.max(1, size);
@@ -114,8 +122,27 @@ export class MedianFrequencySmoother {
   update(hz: number | null): number | null {
     if (hz === null) {
       this.buf = [];
+      this.pendingJump = null;
       return null;
     }
+    if (this.buf.length > 0) {
+      const mid = median(this.buf);
+      const cents = Math.abs(1200 * Math.log2(hz / mid));
+      if (cents >= this.jumpCents) {
+        if (
+          this.pendingJump !== null &&
+          Math.abs(1200 * Math.log2(hz / this.pendingJump)) < this.jumpCents
+        ) {
+          this.buf = [this.pendingJump, hz];
+          if (this.buf.length > this.size) this.buf = this.buf.slice(-this.size);
+          this.pendingJump = null;
+          return median(this.buf);
+        }
+        this.pendingJump = hz;
+        return mid;
+      }
+    }
+    this.pendingJump = null;
     this.buf.push(hz);
     if (this.buf.length > this.size) this.buf.shift();
     return median(this.buf);
@@ -123,5 +150,6 @@ export class MedianFrequencySmoother {
 
   reset(): void {
     this.buf = [];
+    this.pendingJump = null;
   }
 }

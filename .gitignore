@@ -7,3 +7,10 @@ coverage
 test-results
 playwright-report
 eval/data/
+
+# Local evaluation recordings — never commit
+*.m4a
+*.mp3
+*.flac
+eval/*.wav
+eval/**/*.wav

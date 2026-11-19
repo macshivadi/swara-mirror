@@ -11,6 +11,8 @@ export interface LevelSettings {
   /** In-tune window around a swara, in cents. */
   snapCents: number;
   hysteresisCents: number;
+  /** Leave a held swara immediately once pitch is this far from its center. */
+  escapeCents: number;
   displayHoldMs: number;
   notationHoldMs: number;
   notationRestMs: number;
@@ -35,6 +37,7 @@ export const LEVELS: Record<SkillLevel, LevelBase> = {
     label: 'Beginner',
     snapCents: 50,
     hysteresisCents: 22,
+    escapeCents: 80,
     displayHoldMs: 70,
     // Short hold so a note appears well under 0.3s on a phone.
     notationHoldMs: 90,
@@ -54,6 +57,7 @@ export const LEVELS: Record<SkillLevel, LevelBase> = {
     label: 'Intermediate',
     snapCents: 35,
     hysteresisCents: 16,
+    escapeCents: 80,
     displayHoldMs: 80,
     notationHoldMs: 120,
     notationRestMs: 240,
@@ -72,6 +76,7 @@ export const LEVELS: Record<SkillLevel, LevelBase> = {
     label: 'Advanced',
     snapCents: 20,
     hysteresisCents: 10,
+    escapeCents: 70,
     displayHoldMs: 45,
     notationHoldMs: 100,
     notationRestMs: 200,
@@ -122,27 +127,30 @@ export function defaultForgiving(level: SkillLevel): boolean {
 export const FORGIVING_BY_LEVEL: Record<SkillLevel, Partial<LevelSettings> & { medianFrames: number }> = {
   beginner: {
     snapCents: 40,
-    hysteresisCents: 32,
-    displayHoldMs: 100,
-    notationHoldMs: 250,
+    hysteresisCents: 28,
+    escapeCents: 70,
+    displayHoldMs: 60,
+    notationHoldMs: 200,
     notationRestMs: 260,
-    medianFrames: 5,
+    medianFrames: 3,
   },
   intermediate: {
     snapCents: 28,
-    hysteresisCents: 22,
-    displayHoldMs: 90,
-    notationHoldMs: 250,
+    hysteresisCents: 20,
+    escapeCents: 70,
+    displayHoldMs: 50,
+    notationHoldMs: 200,
     notationRestMs: 260,
-    medianFrames: 5,
+    medianFrames: 3,
   },
   advanced: {
     snapCents: 20,
     hysteresisCents: 14,
-    displayHoldMs: 60,
-    notationHoldMs: 250,
+    escapeCents: 65,
+    displayHoldMs: 45,
+    notationHoldMs: 200,
     notationRestMs: 240,
-    medianFrames: 5,
+    medianFrames: 3,
   },
 };
 

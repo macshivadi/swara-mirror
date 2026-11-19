@@ -205,7 +205,12 @@ export class DisplaySmoother {
       return this.current;
     }
 
-    if (timeMs - this.pending.sinceMs >= this.holdMs) {
+    const jump = Math.abs(
+      (pitch.octave * 12 + pitch.semitone) - (this.current.octave * 12 + this.current.semitone),
+    );
+    // Neighbour wobble uses the full hold; a leap of a third or more switches quickly.
+    const needed = jump >= 2 ? Math.min(this.holdMs, 30) : this.holdMs;
+    if (timeMs - this.pending.sinceMs >= needed) {
       this.current = pitch;
       this.pending = null;
       return this.current;
@@ -231,11 +236,16 @@ export function withHysteresis(
   prev: PitchClass | null,
   next: PitchClass,
   hysteresisCents = 18,
+  escapeCents = 90,
 ): PitchClass {
   if (!prev) return next;
   if (prev.swara === next.swara && prev.octave === next.octave) return next;
   const prevCenter = (prev.octave * 12 + prev.semitone) * 100;
-  if (Math.abs(next.totalCents - prevCenter) < 50 + hysteresisCents) {
+  const dist = Math.abs(next.totalCents - prevCenter);
+  // A real leap must leave immediately, even if a wide stay-window would
+  // otherwise keep the old label (forgiving mode uses 50+32 = 82 cents).
+  if (dist >= escapeCents) return next;
+  if (dist < 50 + hysteresisCents) {
     return {
       ...prev,
       frequency: next.frequency,

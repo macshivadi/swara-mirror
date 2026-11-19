@@ -76,3 +76,13 @@ describe('MedianFrequencySmoother', () => {
     expect(m.update(220)).toBe(220);
   });
 });
+
+  it('follows a confirmed leap without staying on the old median', () => {
+    const m = new MedianFrequencySmoother(5);
+    for (const hz of [165, 166, 164, 165, 165]) m.update(hz);
+    // one-frame dip is ignored
+    expect(m.update(114)!).toBeCloseTo(165, 0);
+    // second frame in the new region resets
+    expect(m.update(115)!).toBeLessThan(130);
+    expect(m.update(114)!).toBeCloseTo(114, 0);
+  });

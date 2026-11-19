@@ -18,6 +18,7 @@ import {
   type NotationEvent,
 } from '../music/notation';
 import { hzToSwara, type PitchClass } from '../music/swara';
+import { estimateTonicHz, type TonicEstimate } from '../music/tonic';
 
 export interface PipelineFrame {
   timeMs: number;
@@ -33,12 +34,15 @@ export interface PipelineResult {
   events: NotationEvent[];
   sequence: string[];
   voicedFrameCount: number;
+  saHz: number;
+  tonic: TonicEstimate | null;
 }
 
 export interface NotationSettings {
   notationHoldMs?: number;
   notationRestMs?: number;
   hysteresisCents?: number;
+  escapeCents?: number;
   displayHoldMs?: number;
   medianFrames?: number;
   level?: SkillLevel;
@@ -46,7 +50,8 @@ export interface NotationSettings {
 }
 
 export interface RunPipelineOptions extends NotationSettings {
-  saHz: number;
+  /** Pass `'auto'` to estimate Sa from the take, then label swaras in that key. */
+  saHz: number | 'auto';
   hopSize?: number;
   fftSize?: number;
   mode?: 'listen' | 'calibrate';
@@ -68,16 +73,8 @@ export function runPipeline(
   const minProbability = mode === 'calibrate' ? S.calibrateMinProbability : S.listenMinProbability;
   const minRms = mode === 'calibrate' ? S.calibrateMinRms : S.listenMinRms;
 
-  const notation = resolveNotationSettings(options);
+  const detected: DetectedFrame[] = [];
   const octave = new OctaveStabilizer(S.octaveConfirmMs);
-  const register = new KeyboardRegister();
-  const median = new MedianFrequencySmoother(notation.medianFrames || 1);
-  const smoother = new DisplaySmoother(notation.displayHoldMs);
-  const collector = new NotationCollector({ holdMs: notation.notationHoldMs, restMs: notation.notationRestMs });
-  let sticky: PitchClass | null = null;
-  const useMedian = notation.medianFrames > 0;
-
-  const frames: PipelineFrame[] = [];
   const work = new Float32Array(fftSize);
   const window = new Float32Array(fftSize);
 
@@ -95,48 +92,61 @@ export function runPipeline(
         targetRms: S.makeupTargetRms,
         maxGain: S.makeupMaxGain,
       });
-      const detected = yinDetect(work, sampleRate, {
+      const yin = yinDetect(work, sampleRate, {
         threshold,
         minHz: S.minHz,
         maxHz: S.maxHz,
       });
-      probability = detected.probability;
-      rawFrequency = detected.frequency;
-      const gated = detected.frequency !== null && detected.probability >= minProbability ? detected.frequency : null;
+      probability = yin.probability;
+      rawFrequency = yin.frequency;
+      const gated = yin.frequency !== null && yin.probability >= minProbability ? yin.frequency : null;
       frequency = octave.update(timeMs, gated);
     } else {
       octave.update(timeMs, null);
     }
 
-    frequency = register.update(timeMs, frequency, options.saHz);
-    if (useMedian) frequency = median.update(frequency);
-
-    const classified = frequency ? hzToSwara(frequency, options.saHz) : null;
-    const held: PitchClass | null = classified ? withHysteresis(sticky, classified, notation.hysteresisCents) : null;
-    sticky = held;
-    const display = smoother.update(timeMs, held);
-    collector.update(timeMs, held);
-
-    frames.push({
-      timeMs,
-      frequency,
-      rawFrequency,
-      probability,
-      rms: levelRms,
-      pitch: display,
-    });
+    detected.push({ timeMs, frequency, rawFrequency, probability, rms: levelRms });
   }
 
+  const hopMs = (hop / sampleRate) * 1000;
+  const tonic = estimateTonicHz(
+    detected.map((d) => d.frequency),
+    { hopMs },
+  );
+  const saHz = options.saHz === 'auto' ? (tonic?.hz ?? 220) : options.saHz;
+  const noted = notateFrames(
+    detected.map((d) => ({ timeMs: d.timeMs, frequency: d.frequency })),
+    saHz,
+    options,
+  );
+  const frames = noted.frames.map((fr, i) => ({
+    ...fr,
+    rawFrequency: detected[i]?.rawFrequency ?? fr.rawFrequency,
+    probability: detected[i]?.probability ?? fr.probability,
+    rms: detected[i]?.rms ?? fr.rms,
+  }));
   return {
+    ...noted,
     frames,
-    events: [...collector.getEvents()],
-    sequence: compactSwaraSequence(collector.getEvents()),
+    saHz,
+    tonic,
     voicedFrameCount: frames.filter((f) => f.frequency !== null).length,
   };
 }
 
+interface DetectedFrame {
+  timeMs: number;
+  frequency: number | null;
+  rawFrequency: number | null;
+  probability: number;
+  rms: number;
+}
+
 export function resolveNotationSettings(options: NotationSettings = {}): Required<
-  Pick<NotationSettings, 'notationHoldMs' | 'notationRestMs' | 'hysteresisCents' | 'displayHoldMs' | 'medianFrames'>
+  Pick<
+    NotationSettings,
+    'notationHoldMs' | 'notationRestMs' | 'hysteresisCents' | 'escapeCents' | 'displayHoldMs' | 'medianFrames'
+  >
 > {
   const forgiving = options.forgiving ?? (options.level ? defaultForgiving(options.level) : false);
   const preset = options.level ? settingsFor(options.level, forgiving) : null;
@@ -144,6 +154,7 @@ export function resolveNotationSettings(options: NotationSettings = {}): Require
     notationHoldMs: options.notationHoldMs ?? preset?.notationHoldMs ?? S.notationHoldMs,
     notationRestMs: options.notationRestMs ?? preset?.notationRestMs ?? S.notationRestMs,
     hysteresisCents: options.hysteresisCents ?? preset?.hysteresisCents ?? S.hysteresisCents,
+    escapeCents: options.escapeCents ?? preset?.escapeCents ?? 90,
     displayHoldMs: options.displayHoldMs ?? preset?.displayHoldMs ?? S.displayHoldMs,
     medianFrames: options.medianFrames ?? preset?.medianFrames ?? 0,
   };
@@ -167,7 +178,9 @@ export function notateFrames(
     let frequency = register.update(fr.timeMs, fr.frequency, saHz);
     if (useMedian) frequency = median.update(frequency);
     const classified = frequency ? hzToSwara(frequency, saHz) : null;
-    const held: PitchClass | null = classified ? withHysteresis(sticky, classified, notation.hysteresisCents) : null;
+    const held: PitchClass | null = classified
+      ? withHysteresis(sticky, classified, notation.hysteresisCents, notation.escapeCents)
+      : null;
     sticky = held;
     const display = smoother.update(fr.timeMs, held);
     collector.update(fr.timeMs, held);
@@ -185,5 +198,7 @@ export function notateFrames(
     events: [...collector.getEvents()],
     sequence: compactSwaraSequence(collector.getEvents()),
     voicedFrameCount: out.filter((f) => f.frequency !== null).length,
+    saHz,
+    tonic: null,
   };
 }
