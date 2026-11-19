@@ -6,7 +6,7 @@
  * drag the reference down, or the next real note (e.g. tara Sa after
  * Panchama) gets folded with it.
  */
-export function foldToReference(hz: number, refHz: number, minHz = 70, maxHz = 1200): number {
+export function foldToReference(hz: number, refHz: number, minHz = 70, maxHz = 4000): number {
   if (!(hz > 0) || !(refHz > 0)) return hz;
   let f = hz;
   while (f > refHz * Math.SQRT2 && f / 2 >= minHz) f /= 2;
@@ -35,6 +35,12 @@ export class OctaveStabilizer {
     if (this.ref === null) {
       this.ref = hz;
       return hz;
+    }
+
+    // Whistle-register detections must not be folded down onto a singing
+    // reference — KeyboardRegister will map the phrase as a whole.
+    if (hz >= 1000 && (this.ref < 800 || hz / this.ref > Math.SQRT2)) {
+      return this.considerLeap(timeMs, hz, hz);
     }
 
     const rawCents = Math.abs(centsBetween(hz, this.ref));

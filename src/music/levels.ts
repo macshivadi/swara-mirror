@@ -15,6 +15,10 @@ export interface LevelSettings {
   notationHoldMs: number;
   notationRestMs: number;
   centsMeter: 'hidden' | 'hint' | 'precise';
+  /** Whether this resolved settings object is the forgiving preset. */
+  forgiving: boolean;
+  /** Running-median window in frames; 0 disables smoothing. */
+  medianFrames: number;
   calibrate: Required<
     Pick<
       CalibrateOptions,
@@ -23,7 +27,9 @@ export interface LevelSettings {
   >;
 }
 
-export const LEVELS: Record<SkillLevel, LevelSettings> = {
+type LevelBase = Omit<LevelSettings, 'forgiving' | 'medianFrames'>;
+
+export const LEVELS: Record<SkillLevel, LevelBase> = {
   beginner: {
     id: 'beginner',
     label: 'Beginner',
@@ -107,8 +113,45 @@ export function writeStoredLevel(level: SkillLevel, storage?: Pick<Storage, 'set
   }
 }
 
-export function settingsFor(level: SkillLevel): LevelSettings {
-  return LEVELS[level];
+/** Forgiving pitch is on by default only at Beginner. */
+export function defaultForgiving(level: SkillLevel): boolean {
+  return level === 'beginner';
+}
+
+/** Extra smoothing and a longer hold so slides and wobble don't become notes. */
+export const FORGIVING_BY_LEVEL: Record<SkillLevel, Partial<LevelSettings> & { medianFrames: number }> = {
+  beginner: {
+    snapCents: 40,
+    hysteresisCents: 32,
+    displayHoldMs: 100,
+    notationHoldMs: 250,
+    notationRestMs: 260,
+    medianFrames: 5,
+  },
+  intermediate: {
+    snapCents: 28,
+    hysteresisCents: 22,
+    displayHoldMs: 90,
+    notationHoldMs: 250,
+    notationRestMs: 260,
+    medianFrames: 5,
+  },
+  advanced: {
+    snapCents: 20,
+    hysteresisCents: 14,
+    displayHoldMs: 60,
+    notationHoldMs: 250,
+    notationRestMs: 240,
+    medianFrames: 5,
+  },
+};
+
+export function settingsFor(level: SkillLevel, forgiving: boolean = defaultForgiving(level)): LevelSettings {
+  const base = LEVELS[level];
+  if (!forgiving) {
+    return { ...base, forgiving: false, medianFrames: 0 };
+  }
+  return { ...base, ...FORGIVING_BY_LEVEL[level], forgiving: true };
 }
 
 /** Sharp / flat hint once the pitch is outside the in-tune window but still in the swara bin. */

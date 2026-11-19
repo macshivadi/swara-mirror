@@ -8,7 +8,8 @@ export const AUDIO_SETTINGS = {
   calibrateMinProbability: 0.38,
   calibrateMinRms: 0.003,
   minHz: 70,
-  maxHz: 1200,
+  /** High enough for a bright whistle (~1–3 kHz) without losing low voices. */
+  maxHz: 4000,
   inputGain: 2.4,
   makeupTargetRms: 0.15,
   makeupMaxGain: 20,

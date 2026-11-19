@@ -20,7 +20,7 @@ export interface YinResult {
 
 const DEFAULT_THRESHOLD = 0.15;
 const DEFAULT_MIN_HZ = 70;
-const DEFAULT_MAX_HZ = 1200;
+const DEFAULT_MAX_HZ = 4000;
 
 export function yinDetect(
   buffer: Float32Array,
@@ -189,6 +189,85 @@ export function synthesizeVoice(
     phase += (2 * Math.PI * inst) / sampleRate;
     const n = noise > 0 ? (rand() * 2 - 1) * noise : 0;
     buf[i] = amplitude * Math.sin(phase) + n;
+  }
+  return buf;
+}
+
+/** Voice-like tone with odd and even harmonics, optional vibrato and noise. */
+export function synthesizeHarmonicVoice(
+  frequency: number,
+  sampleRate: number,
+  length: number,
+  options: {
+    amplitude?: number;
+    vibratoHz?: number;
+    vibratoCents?: number;
+    noise?: number;
+    seed?: number;
+    /** Relative amplitudes for partials 1..n. Default is a falling odd+even series. */
+    partials?: readonly number[];
+  } = {},
+): Float32Array {
+  const amplitude = options.amplitude ?? 0.3;
+  const vibratoHz = options.vibratoHz ?? 0;
+  const vibratoCents = options.vibratoCents ?? 0;
+  const noise = options.noise ?? 0;
+  const partials = options.partials ?? [1, 0.55, 0.35, 0.22, 0.14, 0.08];
+  let seed = options.seed ?? 1;
+  const rand = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 0x100000000;
+  };
+  const buf = new Float32Array(length);
+  let phase = 0;
+  const norm = partials.reduce((s, a) => s + Math.abs(a), 0) || 1;
+  for (let i = 0; i < length; i++) {
+    const t = i / sampleRate;
+    const cents = vibratoCents * Math.sin(2 * Math.PI * vibratoHz * t);
+    const inst = frequency * 2 ** (cents / 1200);
+    phase += (2 * Math.PI * inst) / sampleRate;
+    let sample = 0;
+    for (let h = 0; h < partials.length; h++) {
+      sample += partials[h]! * Math.sin(phase * (h + 1));
+    }
+    const n = noise > 0 ? (rand() * 2 - 1) * noise : 0;
+    buf[i] = (amplitude * sample) / norm + n;
+  }
+  return buf;
+}
+
+/** Nearly pure tone with a little wobble, like a human whistle. */
+export function synthesizeWhistle(
+  frequency: number,
+  sampleRate: number,
+  length: number,
+  options: { amplitude?: number; vibratoHz?: number; vibratoCents?: number; noise?: number; seed?: number } = {},
+): Float32Array {
+  return synthesizeVoice(frequency, sampleRate, length, {
+    amplitude: options.amplitude ?? 0.45,
+    vibratoHz: options.vibratoHz ?? 6,
+    vibratoCents: options.vibratoCents ?? 12,
+    noise: options.noise ?? 0.008,
+    seed: options.seed ?? 11,
+  });
+}
+
+/** Linear frequency glide from `fromHz` to `toHz`. */
+export function synthesizeGlide(
+  fromHz: number,
+  toHz: number,
+  sampleRate: number,
+  length: number,
+  options: { amplitude?: number } = {},
+): Float32Array {
+  const amplitude = options.amplitude ?? 0.4;
+  const buf = new Float32Array(length);
+  let phase = 0;
+  for (let i = 0; i < length; i++) {
+    const u = length <= 1 ? 0 : i / (length - 1);
+    const inst = fromHz * 2 ** (u * Math.log2(toHz / fromHz));
+    phase += (2 * Math.PI * inst) / sampleRate;
+    buf[i] = amplitude * Math.sin(phase);
   }
   return buf;
 }

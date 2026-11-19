@@ -6,8 +6,10 @@
  */
 import { applyMakeupGain, rms } from '../audio/level';
 import { OctaveStabilizer } from '../audio/octave';
+import { KeyboardRegister, MedianFrequencySmoother } from '../audio/register';
 import { AUDIO_SETTINGS as S } from '../audio/settings';
 import { yinDetect } from '../audio/yin';
+import { defaultForgiving, settingsFor, type SkillLevel } from '../music/levels';
 import {
   compactSwaraSequence,
   DisplaySmoother,
@@ -38,6 +40,9 @@ export interface NotationSettings {
   notationRestMs?: number;
   hysteresisCents?: number;
   displayHoldMs?: number;
+  medianFrames?: number;
+  level?: SkillLevel;
+  forgiving?: boolean;
 }
 
 export interface RunPipelineOptions extends NotationSettings {
@@ -65,9 +70,12 @@ export function runPipeline(
 
   const notation = resolveNotationSettings(options);
   const octave = new OctaveStabilizer(S.octaveConfirmMs);
+  const register = new KeyboardRegister();
+  const median = new MedianFrequencySmoother(notation.medianFrames || 1);
   const smoother = new DisplaySmoother(notation.displayHoldMs);
   const collector = new NotationCollector({ holdMs: notation.notationHoldMs, restMs: notation.notationRestMs });
   let sticky: PitchClass | null = null;
+  const useMedian = notation.medianFrames > 0;
 
   const frames: PipelineFrame[] = [];
   const work = new Float32Array(fftSize);
@@ -100,6 +108,9 @@ export function runPipeline(
       octave.update(timeMs, null);
     }
 
+    frequency = register.update(timeMs, frequency, options.saHz);
+    if (useMedian) frequency = median.update(frequency);
+
     const classified = frequency ? hzToSwara(frequency, options.saHz) : null;
     const held: PitchClass | null = classified ? withHysteresis(sticky, classified, notation.hysteresisCents) : null;
     sticky = held;
@@ -124,12 +135,17 @@ export function runPipeline(
   };
 }
 
-export function resolveNotationSettings(options: NotationSettings = {}): Required<NotationSettings> {
+export function resolveNotationSettings(options: NotationSettings = {}): Required<
+  Pick<NotationSettings, 'notationHoldMs' | 'notationRestMs' | 'hysteresisCents' | 'displayHoldMs' | 'medianFrames'>
+> {
+  const forgiving = options.forgiving ?? (options.level ? defaultForgiving(options.level) : false);
+  const preset = options.level ? settingsFor(options.level, forgiving) : null;
   return {
-    notationHoldMs: options.notationHoldMs ?? S.notationHoldMs,
-    notationRestMs: options.notationRestMs ?? S.notationRestMs,
-    hysteresisCents: options.hysteresisCents ?? S.hysteresisCents,
-    displayHoldMs: options.displayHoldMs ?? S.displayHoldMs,
+    notationHoldMs: options.notationHoldMs ?? preset?.notationHoldMs ?? S.notationHoldMs,
+    notationRestMs: options.notationRestMs ?? preset?.notationRestMs ?? S.notationRestMs,
+    hysteresisCents: options.hysteresisCents ?? preset?.hysteresisCents ?? S.hysteresisCents,
+    displayHoldMs: options.displayHoldMs ?? preset?.displayHoldMs ?? S.displayHoldMs,
+    medianFrames: options.medianFrames ?? preset?.medianFrames ?? 0,
   };
 }
 
@@ -140,19 +156,24 @@ export function notateFrames(
   options: NotationSettings = {},
 ): PipelineResult {
   const notation = resolveNotationSettings(options);
+  const register = new KeyboardRegister();
+  const median = new MedianFrequencySmoother(notation.medianFrames || 1);
+  const useMedian = notation.medianFrames > 0;
   const smoother = new DisplaySmoother(notation.displayHoldMs);
   const collector = new NotationCollector({ holdMs: notation.notationHoldMs, restMs: notation.notationRestMs });
   let sticky: PitchClass | null = null;
   const out: PipelineFrame[] = [];
   for (const fr of frames) {
-    const classified = fr.frequency ? hzToSwara(fr.frequency, saHz) : null;
+    let frequency = register.update(fr.timeMs, fr.frequency, saHz);
+    if (useMedian) frequency = median.update(frequency);
+    const classified = frequency ? hzToSwara(frequency, saHz) : null;
     const held: PitchClass | null = classified ? withHysteresis(sticky, classified, notation.hysteresisCents) : null;
     sticky = held;
     const display = smoother.update(fr.timeMs, held);
     collector.update(fr.timeMs, held);
     out.push({
       timeMs: fr.timeMs,
-      frequency: fr.frequency,
+      frequency,
       rawFrequency: fr.frequency,
       probability: fr.frequency ? 1 : 0,
       rms: 0,

@@ -1,4 +1,5 @@
 import { PitchTracker } from '../audio/pitchTracker';
+import { KeyboardRegister, MedianFrequencySmoother } from '../audio/register';
 import {
   calibrationErrorMessage,
   evaluateCalibration,
@@ -6,6 +7,7 @@ import {
 } from '../music/calibrate';
 import { formatNotationText, notationFilename } from '../music/exportText';
 import {
+  defaultForgiving,
   intonationHint,
   readStoredLevel,
   settingsFor,
@@ -58,6 +60,8 @@ export interface MirrorState {
   contextState: string;
   micLive: boolean;
   wantsMic: boolean;
+  forgiving: boolean;
+  whistle: boolean;
 }
 
 export interface SwaraMirrorApi {
@@ -70,6 +74,7 @@ export interface SwaraMirrorApi {
   startCalibration: (mode?: 'mic' | 'silent') => Promise<void>;
   stopListening: () => void;
   setLevel: (level: SkillLevel) => void;
+  setForgiving: (on: boolean) => void;
   setFormat: (format: NotationFormat) => void;
   getExportText: (title?: string, date?: Date) => string;
   getState: () => MirrorState;
@@ -89,13 +94,16 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
   root.innerHTML = layout();
 
   let skillLevel: SkillLevel = readStoredLevel(window.localStorage);
-  let level = settingsFor(skillLevel);
+  let forgiving = defaultForgiving(skillLevel);
+  let level = settingsFor(skillLevel, forgiving);
   let format: NotationFormat = 'both';
 
   const tracker = new PitchTracker();
   const collector = new NotationCollector({ holdMs: level.notationHoldMs, restMs: level.notationRestMs });
   const smoother = new DisplaySmoother(level.displayHoldMs);
   const staff = new SwaraStaff(root.querySelector('#staff')!);
+  const register = new KeyboardRegister();
+  const medianSmoother = new MedianFrequencySmoother(level.medianFrames || 1);
 
   let saHz = westernNoteToHz(DEFAULT_SA);
   let listening = false;
@@ -186,6 +194,8 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
       els.saSelect.value = nearest;
     }
     piano.setSaHz(saHz);
+    register.reset();
+    medianSmoother.reset();
     updateSaReadout();
     renderStrip();
     syncStepHighlight();
@@ -197,15 +207,23 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     els.saReadout.textContent = `Sa = ${saHz.toFixed(1)} Hz, near ${note}${centsBit}`;
   }
 
-  function applyLevel(next: SkillLevel, persist = true): void {
+  function applyLevel(next: SkillLevel, persist = true, nextForgiving = defaultForgiving(next)): void {
     skillLevel = next;
-    level = settingsFor(skillLevel);
+    forgiving = nextForgiving;
+    level = settingsFor(skillLevel, forgiving);
     collector.setTiming({ holdMs: level.notationHoldMs, restMs: level.notationRestMs });
     smoother.setHoldMs(level.displayHoldMs);
+    medianSmoother.setSize(level.medianFrames || 1);
+    medianSmoother.reset();
     if (persist) writeStoredLevel(skillLevel, window.localStorage);
     root.querySelectorAll<HTMLButtonElement>('[data-level]').forEach((btn) => {
       btn.classList.toggle('is-on', btn.dataset.level === skillLevel);
       btn.setAttribute('aria-checked', btn.dataset.level === skillLevel ? 'true' : 'false');
+    });
+    root.querySelectorAll<HTMLButtonElement>('[data-forgiving]').forEach((btn) => {
+      const on = btn.dataset.forgiving === 'on';
+      btn.classList.toggle('is-on', on === forgiving);
+      btn.setAttribute('aria-checked', on === forgiving ? 'true' : 'false');
     });
     els.stage.classList.toggle('cents-hidden', level.centsMeter === 'hidden');
   }
@@ -430,8 +448,12 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     tracker.setMode('listen');
     tracker.stopMic();
     stopLoop();
+    register.reset();
+    medianSmoother.reset();
     setListeningUi(false);
     renderPitch(null, null);
+    const hint = root.querySelector<HTMLElement>('#whistle-hint');
+    if (hint) hint.hidden = true;
   }
 
   function beginAutoSa(kind: 'auto' | 'manual' = 'auto'): void {
@@ -520,7 +542,12 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     els.calProgress.hidden = saLocked && !calibrating;
     const reading = tracker.read(now);
     inputLevel = reading.level;
-    const freq = reading.frequency;
+    let freq = register.update(now, reading.frequency, saHz);
+    if (level.medianFrames > 0) freq = medianSmoother.update(freq);
+    const hint = root.querySelector<HTMLElement>('#whistle-hint');
+    if (hint) {
+      hint.hidden = !register.isWhistle();
+    }
     const classified = freq ? hzToSwara(freq, saHz) : null;
     const held = classified ? withHysteresis(stickyPitch, classified, level.hysteresisCents) : null;
     stickyPitch = held;
@@ -744,6 +771,15 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
       els.status.textContent = `Level set to ${settingsFor(value).label}.`;
     });
   });
+  root.querySelectorAll<HTMLButtonElement>('[data-forgiving]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const on = btn.dataset.forgiving === 'on';
+      applyLevel(skillLevel, false, on);
+      els.status.textContent = on
+        ? 'Forgiving pitch is on — short slides are ignored and wobble is smoothed.'
+        : 'Forgiving pitch is off.';
+    });
+  });
   root.querySelectorAll<HTMLButtonElement>('[data-format]').forEach((btn) => {
     btn.addEventListener('click', () => applyFormat(btn.dataset.format as NotationFormat));
   });
@@ -764,6 +800,7 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
     startCalibration: (mode = 'silent') => startCalibration(mode),
     stopListening: () => stopListening(),
     setLevel: (next) => applyLevel(next),
+    setForgiving: (on) => applyLevel(skillLevel, false, on),
     setFormat: (next) => applyFormat(next),
     getExportText: (title, date) => buildExport(title, date ?? new Date()),
     getState: () => ({
@@ -788,6 +825,8 @@ export function mountApp(root: HTMLElement): SwaraMirrorApi {
       contextState: tracker.contextState,
       micLive: tracker.isMicLive(),
       wantsMic: tracker.wantsMic(),
+      forgiving,
+      whistle: register.isWhistle(),
     }),
     getNotationAscii: () => collector.toAsciiText(),
     clearNotation: () => onClear(),
@@ -861,6 +900,7 @@ function layout(): string {
       <div class="piano-wrap no-print">
         <p class="notation-label">Keyboard</p>
         <div id="piano"></div>
+        <p id="whistle-hint" class="status" hidden>Hearing a whistle — showing it on the keyboard.</p>
         <p id="step-label" class="status">Play or step through the captured notation to see the next key.</p>
         <div class="row">
           <button id="btn-prev" type="button">Previous key</button>
@@ -877,6 +917,12 @@ function layout(): string {
         <button type="button" role="radio" data-level="intermediate">Intermediate</button>
         <button type="button" role="radio" data-level="advanced">Advanced</button>
       </div>
+      <p class="notation-label">Forgiving pitch</p>
+      <div class="level-toggle" role="radiogroup" aria-label="Forgiving pitch">
+        <button type="button" role="radio" data-forgiving="on">On</button>
+        <button type="button" role="radio" data-forgiving="off">Off</button>
+      </div>
+      <p class="sa-readout">On by default for Beginner. Notes shorter than about a quarter second are ignored, and wobble is smoothed.</p>
       <p class="notation-label">Your Sa</p>
       <div class="sa-row">
         <label>

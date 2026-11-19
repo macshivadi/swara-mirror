@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { byteToFloatTimeDomain } from './pitchTracker';
-import { synthesizeSine, synthesizeVoice, yinDetect } from './yin';
+import { synthesizeHarmonicVoice, synthesizeSine, synthesizeVoice, synthesizeWhistle, yinDetect } from './yin';
 
 function detect(freq: number, sampleRate = 44100, length = 4096) {
   const buf = synthesizeSine(freq, sampleRate, length);
@@ -87,6 +87,44 @@ describe('yinDetect on sung-like (vibrato / noisy) sines', () => {
   });
 });
 
+
+describe('yinDetect in the whistle range', () => {
+  for (const freq of [1000, 1500, 2000, 2500, 3000, 3520]) {
+    it(`detects a ${freq} Hz sine`, () => {
+      const buf = synthesizeSine(freq, 44100, 4096);
+      const result = yinDetect(buf, 44100, { minHz: 70, maxHz: 4000 });
+      nearly(result.frequency, freq, 10);
+      expect(result.probability).toBeGreaterThan(0.7);
+    });
+  }
+
+  it('tracks a wobbling whistle near 2 kHz', () => {
+    const buf = synthesizeWhistle(2093, 44100, 8192, { vibratoCents: 18, seed: 4 });
+    const result = yinDetect(buf, 44100, { threshold: 0.28, maxHz: 4000 });
+    nearly(result.frequency, 2093, 40);
+  });
+});
+
+describe('yinDetect on harmonic voice (must not jump an octave)', () => {
+  it('keeps the fundamental of a 220 Hz tone with odd and even partials', () => {
+    const buf = synthesizeHarmonicVoice(220, 44100, 8192, {
+      vibratoHz: 5.5,
+      vibratoCents: 25,
+      noise: 0.02,
+      seed: 7,
+    });
+    const result = yinDetect(buf, 44100, { threshold: 0.28, maxHz: 4000 });
+    nearly(result.frequency, 220, 40);
+    expect(result.frequency!).toBeLessThan(330);
+  });
+
+  it('keeps a 130 Hz harmonic voice in the low octave', () => {
+    const buf = synthesizeHarmonicVoice(130.81, 44100, 8192, { vibratoHz: 5, vibratoCents: 20, seed: 2 });
+    const result = yinDetect(buf, 44100, { threshold: 0.28, maxHz: 4000 });
+    nearly(result.frequency, 130.81, 50);
+    expect(result.frequency!).toBeLessThan(200);
+  });
+});
 
 describe('byteToFloatTimeDomain', () => {
   it('maps 128 to silence and 255 near full scale', () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_LEVEL,
+  defaultForgiving,
   intonationHint,
   LEVELS,
   LEVEL_STORAGE_KEY,
@@ -19,9 +20,9 @@ describe('skill levels', () => {
   });
 
   it('uses a wider snap for beginner and a short hold so notes appear quickly', () => {
-    const b = settingsFor('beginner');
-    const i = settingsFor('intermediate');
-    const a = settingsFor('advanced');
+    const b = settingsFor('beginner', false);
+    const i = settingsFor('intermediate', false);
+    const a = settingsFor('advanced', false);
     expect(b.snapCents).toBe(50);
     expect(i.snapCents).toBe(35);
     expect(a.snapCents).toBe(20);
@@ -32,6 +33,30 @@ describe('skill levels', () => {
     expect(b.centsMeter).toBe('hidden');
     expect(i.centsMeter).toBe('hint');
     expect(a.centsMeter).toBe('precise');
+  });
+
+  it('turns forgiving pitch on by default only for beginner', () => {
+    expect(defaultForgiving('beginner')).toBe(true);
+    expect(defaultForgiving('intermediate')).toBe(false);
+    expect(defaultForgiving('advanced')).toBe(false);
+    expect(settingsFor('beginner').forgiving).toBe(true);
+    expect(settingsFor('intermediate').forgiving).toBe(false);
+  });
+
+  it('uses a ~40-cent window and 250 ms minimum note when forgiving at beginner', () => {
+    const b = settingsFor('beginner', true);
+    const i = settingsFor('intermediate', true);
+    const a = settingsFor('advanced', true);
+    expect(b.snapCents).toBe(40);
+    expect(i.snapCents).toBeLessThan(b.snapCents);
+    expect(a.snapCents).toBeLessThan(i.snapCents);
+    expect(b.hysteresisCents).toBeGreaterThan(i.hysteresisCents);
+    expect(i.hysteresisCents).toBeGreaterThan(a.hysteresisCents);
+    for (const s of [b, i, a]) {
+      expect(s.notationHoldMs).toBeGreaterThanOrEqual(250);
+      expect(s.medianFrames).toBeGreaterThanOrEqual(3);
+    }
+    expect(settingsFor('beginner', false).medianFrames).toBe(0);
   });
 
   it('reads and writes the level preference through a storage adapter', () => {
